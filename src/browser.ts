@@ -12,7 +12,8 @@ export const BROWSER_SESSION_STATUSES = [
 ] as const;
 
 export type BrowserSessionStatus = typeof BROWSER_SESSION_STATUSES[number];
-export type ProviderSessionAssessment = 'session_unknown' | 'session_usable' | 'session_needs_reauth';
+export const PROVIDER_SESSION_ASSESSMENTS = ['session_unknown', 'session_usable', 'session_needs_reauth'] as const;
+export type ProviderSessionAssessment = typeof PROVIDER_SESSION_ASSESSMENTS[number];
 
 export interface BrowserSessionInfo {
   status: BrowserSessionStatus;
@@ -41,11 +42,7 @@ export class BrowserUnavailableError extends Error {
   }
 }
 
-const PROVIDER_SESSION_ASSESSMENTS = new Set<ProviderSessionAssessment>([
-  'session_unknown',
-  'session_usable',
-  'session_needs_reauth'
-]);
+const providerSessionAssessmentSet = new Set<ProviderSessionAssessment>(PROVIDER_SESSION_ASSESSMENTS);
 
 export class BrowserSessionManager {
   readonly profileDir: string;
@@ -122,7 +119,7 @@ export class BrowserSessionManager {
   }
 
   assessSession(status: ProviderSessionAssessment): void {
-    if (!PROVIDER_SESSION_ASSESSMENTS.has(status)) {
+    if (!providerSessionAssessmentSet.has(status)) {
       throw new RangeError('Invalid provider session assessment');
     }
     this.lastAssessment = status;

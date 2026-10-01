@@ -2,6 +2,7 @@ import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { CallToolRequestSchema, ErrorCode, ListToolsRequestSchema, McpError } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import { ProviderError, type MarketplaceBackend } from './backend.js';
+import type { ProviderSessionAssessment } from './browser.js';
 import {
   fetchInputSchema,
   fetchOutputSchema,
@@ -30,7 +31,7 @@ const TOOLS = [
   },
   {
     name: 'marketplace_status',
-    description: 'Report service and schema versions and the configured backend name.',
+    description: 'Report service and schema versions, the configured backend name, and the Facebook session state.',
     inputSchema: statusInputSchema,
     outputSchema: statusOutputSchema
   }
@@ -47,6 +48,7 @@ export interface MarketplaceToolOptions {
   backendName?: string;
   backendTimeoutMs?: number;
   shutdownSignal?: AbortSignal;
+  sessionAssessment?: () => ProviderSessionAssessment;
 }
 
 export function registerMarketplaceTools(
@@ -108,7 +110,14 @@ export function registerMarketplaceTools(
           ? runtimeFailure('NOT_FOUND', 'No listing matched the supplied identifier.')
           : { ok: true, backend: backendName, listing };
       } else {
-        output = { ok: true, service_version: SERVICE_VERSION, schema_version: SCHEMA_VERSION, backend: backendName };
+        const sessionAssessment = options.sessionAssessment;
+        output = {
+          ok: true,
+          service_version: SERVICE_VERSION,
+          schema_version: SCHEMA_VERSION,
+          backend: backendName,
+          ...(sessionAssessment ? { facebook_session: { status: sessionAssessment() } } : {})
+        };
       }
       validatedOutput = outputSchema.parse(output);
     } catch (error) {

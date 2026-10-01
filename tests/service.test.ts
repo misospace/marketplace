@@ -1,4 +1,7 @@
 import { request as httpRequest } from 'node:http';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
@@ -6,6 +9,8 @@ import { CallToolResultSchema, ErrorCode } from '@modelcontextprotocol/sdk/types
 import { z } from 'zod';
 import { FIXTURE_LISTINGS } from '../src/fixtures.js';
 import type { MarketplaceBackend } from '../src/backend.js';
+import { chromium } from 'playwright';
+import { BrowserSessionManager } from '../src/browser.js';
 import { ProviderError } from '../src/index.js';
 import { createMarketplaceService, type MarketplaceService } from '../src/service.js';
 import { parseBackendTimeout } from '../src/service.js';
@@ -15,6 +20,7 @@ import { runBackendOperation } from '../src/tools.js';
 let service: MarketplaceService;
 let baseUrl: string;
 const originalFetch = globalThis.fetch;
+const browserAvailable = existsSync(chromium.executablePath());
 const clients: Client[] = [];
 
 async function startService(backend?: MarketplaceBackend): Promise<void> {
@@ -74,7 +80,7 @@ describe('fixture MCP service', () => {
     expect(tools.tools.map(({ description }) => description)).toEqual([
       'Search marketplace listings.',
       'Fetch one marketplace listing by ID or canonical URL. Does not fetch remote URLs.',
-      'Report service and schema versions and the configured backend name.'
+      'Report service and schema versions, the configured backend name, and the Facebook session state.'
     ]);
     for (const tool of tools.tools) {
       expect(tool.outputSchema).toBeDefined();
@@ -116,9 +122,43 @@ describe('fixture MCP service', () => {
     };
     await startServiceWith(backend, { error: vi.fn() });
     const result = structured(await (await connectClient()).callTool({ name: 'marketplace_status', arguments: {} }));
-    expect(result).toEqual({ ok: true, service_version: '0.1.0', schema_version: '1.0.0', backend: 'status-only' });
+    expect(result).toEqual({
+      ok: true,
+      service_version: '0.1.0',
+      schema_version: '1.0.0',
+      backend: 'status-only',
+      facebook_session: { status: 'session_unknown' }
+    });
+    expect(service.browser.getInfo().browserStarted).toBe(false);
     expect(backend.search).not.toHaveBeenCalled();
     expect(backend.fetch).not.toHaveBeenCalled();
+  });
+
+  it.skipIf(!browserAvailable)('reports the current Facebook session assessment in status', async () => {
+    await Promise.allSettled(clients.splice(0).map((client) => client.close()));
+    await service.close();
+    const profileDir = mkdtempSync(join(tmpdir(), 'marketplace-service-browser-'));
+    const browser = new BrowserSessionManager({ profileDir });
+
+    try {
+      await browser.runExclusive(new AbortController().signal, async (page) => {
+        await page.goto('about:blank');
+      });
+      await startServiceWith({ name: 'session-test', search: () => [], fetch: () => null }, { error: vi.fn() }, undefined, browser);
+      const client = await connectClient();
+
+      expect(structured(await client.callTool({ name: 'marketplace_status', arguments: {} })).facebook_session.status)
+        .toBe('session_unknown');
+      service.browser.assessSession('session_usable');
+      expect(structured(await client.callTool({ name: 'marketplace_status', arguments: {} })).facebook_session.status)
+        .toBe('session_usable');
+      service.browser.assessSession('session_needs_reauth');
+      expect(structured(await client.callTool({ name: 'marketplace_status', arguments: {} })).facebook_session.status)
+        .toBe('session_needs_reauth');
+    } finally {
+      await service.close();
+      rmSync(profileDir, { recursive: true, force: true });
+    }
   });
 
   it('uses the stable consumer listing contract and reports backend identity dynamically', async () => {
@@ -587,8 +627,20 @@ describe('fixture MCP service', () => {
   });
 });
 
-async function startServiceWith(backend: MarketplaceBackend, logger: Pick<Console, 'error'>, backendTimeoutMs?: number): Promise<void> {
-  service = createMarketplaceService({ host: '127.0.0.1', port: 0, backend, logger, ...(backendTimeoutMs !== undefined ? { backendTimeoutMs } : {}) });
+async function startServiceWith(
+  backend: MarketplaceBackend,
+  logger: Pick<Console, 'error'>,
+  backendTimeoutMs?: number,
+  browser?: BrowserSessionManager
+): Promise<void> {
+  service = createMarketplaceService({
+    host: '127.0.0.1',
+    port: 0,
+    backend,
+    logger,
+    ...(backendTimeoutMs !== undefined ? { backendTimeoutMs } : {}),
+    ...(browser !== undefined ? { browser } : {})
+  });
   await new Promise<void>((resolve, reject) => {
     service.server.once('error', reject);
     service.server.listen(0, '127.0.0.1', resolve);

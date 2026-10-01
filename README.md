@@ -46,6 +46,16 @@ The service includes a minimal Chromium session layer backed by Playwright `1.63
 
 Container users should mount a persistent volume at the profile directory and run Chromium with `--init --ipc=host`, following Playwright's Docker guidance.
 
+### Facebook session probe
+
+`FacebookSessionProbe` in `src/facebook.ts` composes over the serialized browser manager. `probeSession(signal)` loads the Marketplace entry point and reports `session_usable` for an authenticated Marketplace page, `session_needs_reauth` for a login page or redirect (`LOGIN_REQUIRED`), checkpoint/challenge (`SESSION_INVALID`), or captcha (`CAPTCHA_REQUIRED`). `session_unknown` means no verdict is available for the current probe: the session has never been probed, the page is ambiguous, an in-flight probe is cancelled, or loading fails. A probe cancelled before it starts leaves the previous assessment untouched. Do not read `session_unknown` as "not usable"; only `session_usable` asserts an authenticated Marketplace.
+
+Classification uses the final URL and a small set of semantic signals: a password field or login form, checkpoint form or copy, captcha frame or copy, and a main landmark plus a Marketplace link. It does not depend on hashed CSS classes. The default origin is exactly `https://www.facebook.com`. The probe never automates login, stores or exports credentials, or logs page HTML, cookies, storage, headers, form values, or screenshots.
+
+The origin can be injected only through the constructor for tests (or the service's `facebookBaseUrl` option); it is not an environment variable or tool input. It must be exactly `https://www.facebook.com` or a loopback test origin (`localhost`, `127.0.0.1`, or `::1`, over HTTP or HTTPS); any other origin is rejected, so this seam cannot reach an arbitrary host. A redirect to any other origin, including another Facebook subdomain, deliberately produces `session_unknown` rather than `session_usable`. `marketplace_status` also reports `facebook_session: { status }`, the last known assessment (`session_unknown`, `session_usable`, or `session_needs_reauth`), without doing browser work. This is additive: `schema_version` remains `1.0.0`, and no tool name or other field changed.
+
+The probe is infrastructure for a future provider. No Marketplace search, listing parsing, Messenger, or watch state exists yet, and the fixture backend remains the default.
+
 ## Development checks
 
 ```sh
