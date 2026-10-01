@@ -89,7 +89,7 @@ export function createMarketplaceService(options: ServiceOptions = {}): Marketpl
     // Create the connection synchronously, before any await, so the close()
     // snapshot can never miss an in-flight request while its body is still
     // being read. The unconditional 'close' cleanup below covers early exits.
-    const mcp = new Server({ name: 'marketplace-fixture', version: SERVICE_VERSION }, { capabilities: { tools: {} } });
+    const mcp = new Server({ name: 'marketplace', version: SERVICE_VERSION }, { capabilities: { tools: {} } });
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
       enableJsonResponse: true,

@@ -18,13 +18,13 @@ import {
 const TOOLS = [
   {
     name: 'marketplace_search',
-    description: 'Search synthetic listings from the configured backend. Results include its backend name.',
+    description: 'Search marketplace listings.',
     inputSchema: searchInputSchema,
     outputSchema: searchOutputSchema
   },
   {
     name: 'marketplace_fetch',
-    description: 'Fetch one listing from the configured synthetic backend by ID or canonical example.com URL. Does not fetch remote URLs.',
+    description: 'Fetch one marketplace listing by ID or canonical URL. Does not fetch remote URLs.',
     inputSchema: fetchInputSchema,
     outputSchema: fetchOutputSchema
   },

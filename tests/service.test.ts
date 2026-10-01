@@ -68,9 +68,14 @@ afterEach(async () => {
 describe('fixture MCP service', () => {
   it('supports SDK initialize, list tools, calls, and validates declared schemas', async () => {
     const client = await connectClient();
-    expect(client.getServerVersion()).toEqual({ name: 'marketplace-fixture', version: '0.1.0' });
+    expect(client.getServerVersion()).toEqual({ name: 'marketplace', version: '0.1.0' });
     const tools = await client.listTools();
     expect(tools.tools.map(({ name }) => name)).toEqual(['marketplace_search', 'marketplace_fetch', 'marketplace_status']);
+    expect(tools.tools.map(({ description }) => description)).toEqual([
+      'Search marketplace listings.',
+      'Fetch one marketplace listing by ID or canonical URL. Does not fetch remote URLs.',
+      'Report service and schema versions and the configured backend name.'
+    ]);
     for (const tool of tools.tools) {
       expect(tool.outputSchema).toBeDefined();
       expect(tool.outputSchema?.type).toBe('object');

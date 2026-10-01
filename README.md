@@ -1,6 +1,6 @@
 # Marketplace MCP fixture service
 
-A small, fixture-only Model Context Protocol service for exercising Marketplace-shaped integrations. It returns synthetic listings only: it does not access Facebook, Marketplace, or any remote listing or image URL.
+A small, fixture-only Model Context Protocol service for exercising Marketplace-shaped integrations. It returns synthetic listings only: it does not access Facebook, Marketplace, or any remote listing or image URL. Its public MCP server identity is `marketplace`; the built-in backend is named `fixture`.
 
 ## Run
 
