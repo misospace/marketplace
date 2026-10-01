@@ -1,6 +1,15 @@
 import { createMarketplaceService, listen } from './service.js';
 
 export { FixtureBackend, ProviderError, type MarketplaceBackend } from './backend.js';
+export {
+  BROWSER_SESSION_STATUSES,
+  BrowserSessionManager,
+  BrowserUnavailableError,
+  type BrowserSessionInfo,
+  type BrowserSessionOptions,
+  type BrowserSessionStatus,
+  type ProviderSessionAssessment
+} from './browser.js';
 export { FIXTURE_LISTINGS } from './fixtures.js';
 export { createMarketplaceService, listen, type MarketplaceService, type ServiceOptions } from './service.js';
 export * from './domain.js';

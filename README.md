@@ -40,6 +40,12 @@ Backends may throw the exported `ProviderError` class to return a known runtime 
 
 Each search/fetch backend call has its own deadline, defaulting to 30,000 ms. Override it with `BACKEND_TIMEOUT_MS` or the `backendTimeoutMs` service option; values must be positive integers below 60,000 ms. The backend receives an `AbortSignal` that aborts on deadline, MCP request cancellation/disconnect, or service shutdown. A backend must cooperate with this signal to stop its underlying work: the service can stop awaiting an arbitrary non-cooperative promise, but cannot forcibly cancel the work itself.
 
+## Browser runtime
+
+The service includes a minimal Chromium session layer backed by Playwright `1.63.0`. It lazily starts one browser with a persistent profile at `BROWSER_PROFILE_DIR` (default `$HOME/.marketplace/browser-profile`) and serializes browser work through one page at a time. An invalid `BROWSER_PROFILE_DIR` fails service startup. Browser operations use the same `AbortSignal` and deadline path as backend work. An in-progress browser launch cannot be aborted mid-launch (Playwright exposes no signal for it): it is bounded by the launch timeout, defaulting to 30,000 ms, and the signal is honoured immediately before and after the launch. Non-cancellable infrastructure steps (page creation and page/context teardown) are bounded by a settle timeout, defaulting to 5,000 ms, so an unresponsive browser cannot wedge the serialized queue. If the timeout expires during page creation or page teardown, the current browser context is discarded and the session is marked unavailable; the next operation waits for teardown to settle and relaunches a clean context rather than continuing against a potentially unhealthy browser. Chromium runs as the non-root container user; no credentials are stored by this service, and cookies, localStorage, headers, page content, and profile contents are never logged. Do not set `PWDEBUG` or `DEBUG=pw:*` in production: Playwright debug logging can include page content. No CDP endpoint is exposed. This is infrastructure for a future provider; no current MCP tool uses the browser.
+
+Container users should mount a persistent volume at the profile directory and run Chromium with `--init --ipc=host`, following Playwright's Docker guidance.
+
 ## Development checks
 
 ```sh

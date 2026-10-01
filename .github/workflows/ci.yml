@@ -37,12 +37,16 @@ jobs:
           cache: npm
       - name: Install dependencies
         run: npm ci --ignore-scripts
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
       - name: Typecheck
         run: npm run typecheck
       - name: Lint
         run: npm run lint
       - name: Test
         run: npm run test
+        env:
+          REQUIRE_BROWSER_TESTS: "1"
       - name: Build
         run: npm run build
 
@@ -59,4 +63,9 @@ jobs:
         with:
           context: .
           push: false
+          load: true
           tags: marketplace:ci
+      - name: Verify Chromium in the image
+        run: >-
+          docker run --rm --entrypoint node marketplace:ci --input-type=module -e
+          "import('playwright').then(async ({chromium})=>{const c=await chromium.launchPersistentContext('/tmp/marketplace-profile',{headless:true});const p=await c.newPage();await p.setContent('<h1>ok</h1>');console.log('chromium-ok');await c.close();}).catch((e)=>{console.error(e);process.exit(1)})"
