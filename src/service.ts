@@ -4,6 +4,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import type { MarketplaceBackend } from './backend.js';
 import { FixtureBackend } from './backend.js';
 import { backendNameSchema, SERVICE_VERSION } from './domain.js';
+import { BrowserSessionManager } from './browser.js';
 import { registerMarketplaceTools } from './tools.js';
 
 const MAX_REQUEST_BODY_SIZE = 64 * 1024;
@@ -18,12 +19,15 @@ export interface ServiceOptions {
   port?: number;
   logger?: Pick<Console, 'error'>;
   backendTimeoutMs?: number;
+  browser?: BrowserSessionManager;
+  browserProfileDir?: string;
 }
 
 export interface MarketplaceService {
   readonly server: HttpServer;
   readonly host: string;
   readonly port: number;
+  readonly browser: BrowserSessionManager;
   close(): Promise<void>;
   address(): ReturnType<HttpServer['address']>;
 }
@@ -42,6 +46,10 @@ export function createMarketplaceService(options: ServiceOptions = {}): Marketpl
     throw new RangeError('backendTimeoutMs must be a positive integer below 60000');
   }
   const logger = options.logger ?? console;
+  const browser = options.browser ?? new BrowserSessionManager({
+    ...(options.browserProfileDir !== undefined ? { profileDir: options.browserProfileDir } : {}),
+    logger
+  });
   const active = new Set<{ mcp: Server; transport: StreamableHTTPServerTransport }>();
   let shuttingDown = false;
   const shutdownController = new AbortController();
@@ -169,6 +177,7 @@ export function createMarketplaceService(options: ServiceOptions = {}): Marketpl
         await Promise.allSettled([mcp.close(), transport.close()]);
       }));
       await closing;
+      await browser.close();
     })();
     return closePromise;
   };
@@ -177,6 +186,7 @@ export function createMarketplaceService(options: ServiceOptions = {}): Marketpl
     server: httpServer,
     host,
     port,
+    browser,
     address: () => httpServer.address(),
     close
   };

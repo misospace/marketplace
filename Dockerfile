@@ -17,8 +17,14 @@ RUN npm ci --omit=dev --ignore-scripts
 FROM base AS runtime
 ENV NODE_ENV=production \
     HOST=0.0.0.0 \
-    PORT=8080
+    PORT=8080 \
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
+    BROWSER_PROFILE_DIR=/home/node/.marketplace/browser-profile
 COPY --from=production-dependencies --chown=node:node /app/node_modules ./node_modules
+# Follow Playwright's documented "build your own image" approach; match the browser to the pinned npm package.
+RUN ./node_modules/.bin/playwright install --with-deps chromium \
+    && chown -R node:node /ms-playwright \
+    && rm -rf /var/lib/apt/lists/*
 COPY --from=build --chown=node:node /app/dist ./dist
 USER node
 EXPOSE 8080
