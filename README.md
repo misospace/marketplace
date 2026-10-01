@@ -21,7 +21,7 @@ docker build -t marketplace-mcp-fixture .
 docker run --rm -p 8080:8080 marketplace-mcp-fixture
 ```
 
-GHCR publishing runs for pushes to `main` and version tags (`v*.*.*`), after the Node 24 typecheck, lint, test, and build checks pass. The shared Renovate preset is used, but automerge is deliberately disabled because this private repository does not yet have a branch-protection plan.
+GHCR publishing runs for pushes to `main` and version tags (`v*.*.*`), after the Node 24 typecheck, lint, test, and build checks pass. Renovate uses the shared org preset; automatic dependency merges remain disabled for manual review during the fixture milestone.
 
 The service has no built-in authentication. Run it only on a trusted private network and provide network-level access controls before exposing it to other networks. ToolHive can use the service's Streamable HTTP transport at port `8080` and path `/mcp`, but it is not registered with ToolHive yet.
 
