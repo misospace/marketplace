@@ -26,7 +26,7 @@ export interface BrowserSessionOptions {
   profileDir?: string;
   headless?: boolean;
   launchTimeoutMs?: number;
-  closeTimeoutMs?: number;
+  settleTimeoutMs?: number;
   launchArgs?: string[];
   logger?: Pick<Console, 'error'>;
 }
@@ -52,7 +52,7 @@ export class BrowserSessionManager {
   private readonly profileExisted: boolean;
   private readonly headless: boolean;
   private readonly launchTimeoutMs: number;
-  private readonly closeTimeoutMs: number;
+  private readonly settleTimeoutMs: number;
   private readonly launchArgs: string[];
   private readonly logger: Pick<Console, 'error'>;
   private context: BrowserContext | undefined;
@@ -68,14 +68,14 @@ export class BrowserSessionManager {
     this.profileExisted = existsSync(this.profileDir);
     this.headless = options.headless ?? true;
     this.launchTimeoutMs = options.launchTimeoutMs ?? 30_000;
-    this.closeTimeoutMs = options.closeTimeoutMs ?? 5_000;
+    this.settleTimeoutMs = options.settleTimeoutMs ?? 5_000;
     this.launchArgs = [...(options.launchArgs ?? [])];
     this.logger = options.logger ?? console;
     if (!Number.isSafeInteger(this.launchTimeoutMs) || this.launchTimeoutMs <= 0) {
       throw new RangeError('launchTimeoutMs must be a positive integer');
     }
-    if (!Number.isSafeInteger(this.closeTimeoutMs) || this.closeTimeoutMs <= 0) {
-      throw new RangeError('closeTimeoutMs must be a positive integer');
+    if (!Number.isSafeInteger(this.settleTimeoutMs) || this.settleTimeoutMs <= 0) {
+      throw new RangeError('settleTimeoutMs must be a positive integer');
     }
     if (!Array.isArray(this.launchArgs) || this.launchArgs.some((argument) => typeof argument !== 'string')) {
       throw new TypeError('launchArgs must be an array of strings');
@@ -134,7 +134,19 @@ export class BrowserSessionManager {
       if (signal.aborted) throw signal.reason ?? new Error('Browser operation aborted');
       const context = await this.ensureContext(signal);
       if (signal.aborted) throw signal.reason ?? new Error('Browser operation aborted');
-      const page = await context.newPage();
+      const pagePromise = context.newPage();
+      const page = await this.settle(pagePromise);
+      if (!page) {
+        void pagePromise.then(
+          (latePage) => this.settleIgnoring(latePage.close().catch(() => undefined)),
+          () => undefined
+        );
+        throw new BrowserUnavailableError('Browser did not provide a page in time');
+      }
+      if (signal.aborted) {
+        await this.settleIgnoring(page.close().catch(() => undefined));
+        throw signal.reason ?? new Error('Browser operation aborted');
+      }
       let rejectAbort!: (reason: unknown) => void;
       const aborted = new Promise<never>((_, reject) => { rejectAbort = reject; });
       let abortClose: Promise<void> | undefined;
@@ -151,7 +163,7 @@ export class BrowserSessionManager {
         }), aborted]);
       } finally {
         signal.removeEventListener('abort', onAbort);
-        await (abortClose ?? page.close().catch(() => undefined));
+        await this.settleIgnoring(abortClose ?? page.close().catch(() => undefined));
       }
     });
   }
@@ -163,19 +175,27 @@ export class BrowserSessionManager {
     this.context = undefined;
     this.closePromise = (async () => {
       if (!context) return;
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      try {
-        await Promise.race([
-          context.close().catch(() => undefined),
-          new Promise<void>((resolve) => {
-            timer = setTimeout(resolve, this.closeTimeoutMs);
-          })
-        ]);
-      } finally {
-        if (timer) clearTimeout(timer);
-      }
+      await this.settleIgnoring(context.close().catch(() => undefined));
     })();
     return this.closePromise;
+  }
+
+  private async settle<T>(promise: Promise<T>): Promise<T | undefined> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        promise,
+        new Promise<undefined>((resolve) => {
+          timer = setTimeout(() => resolve(undefined), this.settleTimeoutMs);
+        })
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  private async settleIgnoring(promise: Promise<unknown>): Promise<void> {
+    await this.settle(promise);
   }
 
   private enqueue<T>(fn: () => Promise<T>): Promise<T> {
@@ -208,6 +228,7 @@ export class BrowserSessionManager {
       context.once('close', () => {
         if (this.context === context) {
           this.context = undefined;
+          this.lastAssessment = 'session_unknown';
           if (!this.closed) this.lastLaunchError = 'Browser session closed unexpectedly';
         }
       });

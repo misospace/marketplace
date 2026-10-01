@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { chromium } from 'playwright';
-import type { BrowserSessionManager } from '../src/browser.js';
+import type { BrowserSessionManager, BrowserSessionOptions } from '../src/browser.js';
 import { BrowserSessionManager as BrowserManager, BrowserUnavailableError } from '../src/browser.js';
 import type { MarketplaceBackend } from '../src/backend.js';
 import { createMarketplaceService, type MarketplaceService } from '../src/service.js';
@@ -73,6 +73,8 @@ describe.skipIf(!browserAvailable)('browser session manager', () => {
       return page.title();
     });
 
+    manager.assessSession('session_usable');
+    expect(manager.getInfo().status).toBe('session_usable');
     await manager.runExclusive(new AbortController().signal, async (page) => {
       await page.context().close();
     });
@@ -130,6 +132,35 @@ describe.skipIf(!browserAvailable)('browser session manager', () => {
     releaseFirst();
     await Promise.all([first, second]);
     expect(order).toEqual(['a:start', 'a:end', 'b:start', 'b:end']);
+  });
+
+  it('bounds a hanging page close and releases the mutex after abort', async () => {
+    const manager = createManager({ settleTimeoutMs: 200 });
+    const controller = new AbortController();
+    const startedAt = Date.now();
+    const operation = manager.runExclusive(controller.signal, async (page) => {
+      page.close = () => new Promise<void>(() => undefined);
+      controller.abort(new Error('test cancellation'));
+    });
+
+    await expect(operation).rejects.toThrow('test cancellation');
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
+    await expect(manager.runExclusive(new AbortController().signal, async (page) => {
+      await page.goto(`${synthetic.origin}/`);
+      return page.title();
+    })).resolves.toBe('synthetic');
+  });
+
+  it('bounds a hanging context page creation', async () => {
+    const manager = createManager({ settleTimeoutMs: 200 });
+    await manager.runExclusive(new AbortController().signal, async (page) => {
+      page.context().newPage = () => new Promise<typeof page>(() => undefined);
+    });
+
+    const startedAt = Date.now();
+    await expect(manager.runExclusive(new AbortController().signal, async () => undefined))
+      .rejects.toBeInstanceOf(BrowserUnavailableError);
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
   });
 
   it('cancels an in-flight page operation and releases the mutex', async () => {
@@ -259,12 +290,12 @@ describe.skipIf(!browserAvailable)('browser session manager', () => {
   });
 });
 
-function createManager(): BrowserSessionManager {
-  return makeManager(makeProfileDir());
+function createManager(options: BrowserSessionOptions = {}): BrowserSessionManager {
+  return makeManager(makeProfileDir(), options);
 }
 
-function makeManager(profileDir: string): BrowserSessionManager {
-  const manager = new BrowserManager({ profileDir, logger: { error: () => undefined } });
+function makeManager(profileDir: string, options: BrowserSessionOptions = {}): BrowserSessionManager {
+  const manager = new BrowserManager({ ...options, profileDir, logger: { error: () => undefined } });
   managers.push(manager);
   return manager;
 }
