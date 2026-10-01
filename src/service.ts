@@ -3,19 +3,21 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import type { MarketplaceBackend } from './backend.js';
 import { FixtureBackend } from './backend.js';
-import { SERVICE_VERSION } from './domain.js';
+import { backendNameSchema, SERVICE_VERSION } from './domain.js';
 import { registerMarketplaceTools } from './tools.js';
 
 const MAX_REQUEST_BODY_SIZE = 64 * 1024;
 const BODY_ERROR = Symbol('body-error');
 const HOST = parseHost(process.env.HOST);
 const PORT = parsePort(process.env.PORT);
+const BACKEND_TIMEOUT_MS = parseBackendTimeout(process.env.BACKEND_TIMEOUT_MS);
 
 export interface ServiceOptions {
   backend?: MarketplaceBackend;
   host?: string;
   port?: number;
   logger?: Pick<Console, 'error'>;
+  backendTimeoutMs?: number;
 }
 
 export interface MarketplaceService {
@@ -28,15 +30,21 @@ export interface MarketplaceService {
 
 export function createMarketplaceService(options: ServiceOptions = {}): MarketplaceService {
   const backend = options.backend ?? new FixtureBackend();
+  const backendName = backendNameSchema.parse(backend.name);
   const host = options.host ?? HOST;
   const port = options.port ?? PORT;
   if (!Number.isInteger(port) || port < 0 || port > 65_535) {
     throw new RangeError('port must be an integer between 0 and 65535');
   }
   if (!host.trim()) throw new Error('host must not be empty');
+  const backendTimeoutMs = options.backendTimeoutMs ?? BACKEND_TIMEOUT_MS;
+  if (!Number.isSafeInteger(backendTimeoutMs) || backendTimeoutMs <= 0 || backendTimeoutMs >= 60_000) {
+    throw new RangeError('backendTimeoutMs must be a positive integer below 60000');
+  }
   const logger = options.logger ?? console;
   const active = new Set<{ mcp: Server; transport: StreamableHTTPServerTransport }>();
   let shuttingDown = false;
+  const shutdownController = new AbortController();
   let closePromise: Promise<void> | undefined;
 
   const httpServer = createServer();
@@ -133,7 +141,7 @@ export function createMarketplaceService(options: ServiceOptions = {}): Marketpl
     }
 
     try {
-      registerMarketplaceTools(mcp, backend, logger);
+      registerMarketplaceTools(mcp, backend, logger, { backendName, backendTimeoutMs, shutdownSignal: shutdownController.signal });
       await mcp.connect(transport);
       await transport.handleRequest(request, response, body);
       if (response.writableEnded || response.destroyed) await cleanup();
@@ -150,6 +158,7 @@ export function createMarketplaceService(options: ServiceOptions = {}): Marketpl
   const close = (): Promise<void> => {
     if (closePromise) return closePromise;
     shuttingDown = true;
+    shutdownController.abort(new Error('Service shutting down'));
     closePromise = (async () => {
       const closing = new Promise<void>((resolve, reject) => {
         if (!httpServer.listening) return resolve();
@@ -181,6 +190,16 @@ function parseHost(value: string | undefined): string {
   return host;
 }
 
+export function parseBackendTimeout(value: string | undefined): number {
+  if (value === undefined) return 30_000;
+  if (!/^\d+$/.test(value)) throw new RangeError('BACKEND_TIMEOUT_MS must be a positive integer below 60000');
+  const timeout = Number(value);
+  if (!Number.isSafeInteger(timeout) || timeout <= 0 || timeout >= 60_000) {
+    throw new RangeError('BACKEND_TIMEOUT_MS must be a positive integer below 60000');
+  }
+  return timeout;
+}
+
 function parsePort(value: string | undefined): number {
   if (value === undefined) return 8080;
   if (!/^\d+$/.test(value)) throw new RangeError('PORT must be an integer between 0 and 65535');
@@ -194,8 +213,9 @@ function hasMalformedToolArguments(body: unknown): boolean {
   if (!('params' in body) || typeof body.params !== 'object' || body.params === null || !('arguments' in body.params)) return false;
   const args = body.params.arguments;
   // Batch arrays bypass this pre-check; the SDK validates each item.
-  if (args === undefined || (typeof args === 'object' && args !== null)) return args === null;
-  return true;
+  if (args === undefined) return false;
+  if (Array.isArray(args) || args === null) return true;
+  return typeof args !== 'object';
 }
 
 function getJsonRpcRequestId(body: unknown): { present: boolean; value: unknown } {

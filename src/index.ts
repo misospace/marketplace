@@ -1,6 +1,6 @@
 import { createMarketplaceService, listen } from './service.js';
 
-export { FixtureBackend, type MarketplaceBackend } from './backend.js';
+export { FixtureBackend, ProviderError, type MarketplaceBackend } from './backend.js';
 export { FIXTURE_LISTINGS } from './fixtures.js';
 export { createMarketplaceService, listen, type MarketplaceService, type ServiceOptions } from './service.js';
 export * from './domain.js';

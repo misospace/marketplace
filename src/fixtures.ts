@@ -11,9 +11,9 @@ export const FIXTURE_LISTINGS: readonly Listing[] = [
     posted_at: '2025-03-04T10:00:00.000Z',
     updated_at: '2025-03-05T12:30:00.000Z',
     description: 'Steel frame road bike, tuned and ready to ride. Synthetic fixture listing.',
-    image_urls: ['https://example.com/images/fixture-bike-001.jpg'],
+    images: ['https://example.com/images/fixture-bike-001.jpg'],
     seller: { id: 'fixture-seller-01', name: 'Fixture Seller' },
-    state: 'available'
+    state: 'active'
   },
   {
     id: 'fixture-chair-002',
@@ -23,8 +23,10 @@ export const FIXTURE_LISTINGS: readonly Listing[] = [
     currency: 'USD',
     location: 'Seattle, WA',
     posted_at: '2025-02-10T09:15:00.000Z',
+    updated_at: null,
     description: 'Two solid oak chairs with a few marks from use. Synthetic fixture listing.',
-    image_urls: ['https://example.com/images/fixture-chair-002.jpg'],
+    images: ['https://example.com/images/fixture-chair-002.jpg'],
+    seller: null,
     state: 'pending'
   },
   {
@@ -35,8 +37,10 @@ export const FIXTURE_LISTINGS: readonly Listing[] = [
     currency: 'USD',
     location: 'Portland, OR',
     posted_at: '2025-01-28T16:45:00.000Z',
+    updated_at: null,
     description: 'Mechanical film camera; message for details. Synthetic fixture listing.',
-    image_urls: [],
+    images: [],
+    seller: null,
     state: 'unknown'
   },
   {
@@ -48,8 +52,9 @@ export const FIXTURE_LISTINGS: readonly Listing[] = [
     location: 'Portland, OR',
     posted_at: '2024-12-12T08:00:00.000Z',
     updated_at: '2025-01-03T14:00:00.000Z',
+    seller: null,
     description: 'Small brass desk lamp in working condition. Synthetic fixture listing.',
-    image_urls: ['https://example.com/images/fixture-lamp-004.jpg'],
+    images: ['https://example.com/images/fixture-lamp-004.jpg'],
     state: 'sold'
   },
   {
@@ -60,10 +65,11 @@ export const FIXTURE_LISTINGS: readonly Listing[] = [
     currency: 'USD',
     location: 'Tacoma, WA',
     posted_at: '2025-03-11T11:20:00.000Z',
+    updated_at: null,
     description: 'Five-shelf pine bookcase with adjustable shelves. Synthetic fixture listing.',
-    image_urls: ['https://example.com/images/fixture-shelf-005.jpg'],
+    images: ['https://example.com/images/fixture-shelf-005.jpg'],
     seller: { name: 'Example Seller', url: 'https://example.com/sellers/fixture-seller-05' },
-    state: 'available'
+    state: 'active'
   },
   {
     id: 'fixture-sofa-006',
@@ -73,8 +79,10 @@ export const FIXTURE_LISTINGS: readonly Listing[] = [
     currency: 'USD',
     location: 'Eugene, OR',
     posted_at: '2025-03-18T13:00:00.000Z',
+    updated_at: null,
+    seller: null,
     description: 'Compact blue fabric sofa, smoke-free home. Synthetic fixture listing.',
-    image_urls: [],
-    state: 'available'
+    images: [],
+    state: 'removed'
   }
 ];

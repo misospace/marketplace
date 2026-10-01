@@ -5,6 +5,21 @@ export const SERVICE_VERSION = '0.1.0';
 export const MAX_QUERY_LENGTH = 256;
 export const MAX_LOCATION_LENGTH = 256;
 export const MAX_LISTING_ID_LENGTH = 128;
+export const MAX_BACKEND_NAME_LENGTH = 64;
+export const MAX_PROVIDER_ERROR_MESSAGE_LENGTH = 256;
+export const MAX_PROVIDER_ACTION_LENGTH = 128;
+
+export const PROVIDER_ERROR_CODES = [
+  'AUTH_EXPIRED',
+  'LOGIN_REQUIRED',
+  'CAPTCHA_REQUIRED',
+  'SESSION_INVALID',
+  'RATE_LIMITED',
+  'UPSTREAM_ERROR',
+  'TIMEOUT'
+] as const;
+
+export const backendNameSchema = z.string().min(1).max(MAX_BACKEND_NAME_LENGTH).regex(/\S/);
 
 const httpUrlSchema = z.string().max(2048).url().regex(/^[Hh][Tt][Tt][Pp][Ss]?:\/\/[^\s/@]+(?:[/?#][^\s]*)?$/).meta({ format: 'uri' }).refine((value) => {
   try {
@@ -30,12 +45,12 @@ export const listingSchema = z.object({
   price: z.number().finite().nonnegative().nullable(),
   currency: z.string().min(1).max(3),
   location: z.string().min(1).max(MAX_LOCATION_LENGTH),
-  posted_at: isoDateTimeSchema.optional(),
-  updated_at: isoDateTimeSchema.optional(),
+  posted_at: isoDateTimeSchema.nullable(),
+  updated_at: isoDateTimeSchema.nullable(),
   description: z.string().max(280),
-  image_urls: z.array(httpUrlSchema).max(6),
-  seller: sellerSchema.optional(),
-  state: z.enum(['available', 'pending', 'sold', 'unknown'])
+  images: z.array(httpUrlSchema).max(6),
+  seller: sellerSchema.nullable(),
+  state: z.enum(['active', 'sold', 'pending', 'removed', 'unknown'])
 }).strict();
 
 export type Listing = z.infer<typeof listingSchema>;
@@ -59,12 +74,28 @@ export const fetchInputSchema = z.object({
 
 export const statusInputSchema = z.object({}).strict();
 
-const runtimeErrorSchema = z.object({
-  code: z.string().min(1),
-  message: z.string().min(1),
-  action_required: z.string().optional(),
+export const runtimeErrorCodeSchema = z.enum([
+  ...PROVIDER_ERROR_CODES,
+  'NOT_FOUND',
+  'INTERNAL_ERROR'
+]);
+
+export const providerErrorMetadataSchema = z.object({
+  action_required: z.string().min(1).max(MAX_PROVIDER_ACTION_LENGTH).optional(),
   login_url: httpUrlSchema.optional(),
   retry_after: z.number().int().nonnegative().optional()
+}).strict();
+
+export const providerErrorSchema = z.object({
+  code: z.enum(PROVIDER_ERROR_CODES),
+  message: z.string().min(1).max(MAX_PROVIDER_ERROR_MESSAGE_LENGTH),
+  ...providerErrorMetadataSchema.shape
+}).strict();
+
+const runtimeErrorSchema = z.object({
+  code: runtimeErrorCodeSchema,
+  message: z.string().min(1).max(MAX_PROVIDER_ERROR_MESSAGE_LENGTH),
+  ...providerErrorMetadataSchema.shape
 }).strict();
 
 export const runtimeFailureSchema = z.object({
@@ -74,13 +105,13 @@ export const runtimeFailureSchema = z.object({
 
 export const searchSuccessSchema = z.object({
   ok: z.literal(true),
-  backend: z.literal('fixture'),
+  backend: backendNameSchema,
   listings: z.array(listingSchema).max(20)
 }).strict();
 
 export const fetchSuccessSchema = z.object({
   ok: z.literal(true),
-  backend: z.literal('fixture'),
+  backend: backendNameSchema,
   listing: listingSchema
 }).strict();
 
@@ -88,10 +119,12 @@ export const statusSuccessSchema = z.object({
   ok: z.literal(true),
   service_version: z.literal(SERVICE_VERSION),
   schema_version: z.literal(SCHEMA_VERSION),
-  backend: z.literal('fixture')
+  backend: backendNameSchema
 }).strict();
 
 export const searchOutputSchema = z.union([searchSuccessSchema, runtimeFailureSchema]);
 export const fetchOutputSchema = z.union([fetchSuccessSchema, runtimeFailureSchema]);
 export const statusOutputSchema = statusSuccessSchema;
 export type RuntimeFailure = z.infer<typeof runtimeFailureSchema>;
+export type ProviderErrorCode = typeof PROVIDER_ERROR_CODES[number];
+export type ProviderErrorMetadata = z.infer<typeof providerErrorMetadataSchema>;

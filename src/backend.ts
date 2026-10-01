@@ -1,15 +1,42 @@
-import { fetchInputSchema, searchInputSchema, type Listing } from './domain.js';
+import { z } from 'zod';
+import {
+  fetchInputSchema,
+  providerErrorMetadataSchema,
+  providerErrorSchema,
+  searchInputSchema,
+  type Listing,
+  type ProviderErrorCode,
+  type ProviderErrorMetadata
+} from './domain.js';
 import { FIXTURE_LISTINGS } from './fixtures.js';
 
 export interface MarketplaceBackend {
-  search(input: ReturnType<typeof searchInputSchema.parse>): Promise<Listing[]> | Listing[];
-  fetch(input: ReturnType<typeof fetchInputSchema.parse>): Promise<Listing | null> | Listing | null;
+  readonly name: string;
+  search(input: ReturnType<typeof searchInputSchema.parse>, signal: AbortSignal): Promise<Listing[]> | Listing[];
+  fetch(input: ReturnType<typeof fetchInputSchema.parse>, signal: AbortSignal): Promise<Listing | null> | Listing | null;
+}
+
+export class ProviderError extends Error {
+  readonly code: ProviderErrorCode;
+  readonly metadata: ProviderErrorMetadata;
+
+  constructor(code: ProviderErrorCode, message: string, metadata: ProviderErrorMetadata = {}) {
+    const parsedMetadata = providerErrorMetadataSchema.safeParse(metadata);
+    const parsed = providerErrorSchema.safeParse({ ...metadata, code, message });
+    if (!parsedMetadata.success || !parsed.success) throw new TypeError('Invalid ProviderError fields');
+    super(parsed.data.message);
+    this.name = 'ProviderError';
+    this.code = parsed.data.code;
+    this.metadata = parsedMetadata.data;
+  }
 }
 
 export class FixtureBackend implements MarketplaceBackend {
+  readonly name = 'fixture';
+
   constructor(private readonly listings: readonly Listing[] = FIXTURE_LISTINGS) {}
 
-  search(input: ReturnType<typeof searchInputSchema.parse>): Listing[] {
+  search(input: ReturnType<typeof searchInputSchema.parse>, _signal: AbortSignal): Listing[] {
     const query = input.query.toLowerCase();
     const location = input.location.toLowerCase();
 
@@ -22,7 +49,7 @@ export class FixtureBackend implements MarketplaceBackend {
     }).slice(0, input.limit);
   }
 
-  fetch(input: ReturnType<typeof fetchInputSchema.parse>): Listing | null {
+  fetch(input: ReturnType<typeof fetchInputSchema.parse>, _signal: AbortSignal): Listing | null {
     if (input.id !== undefined) {
       return this.listings.find((listing) => listing.id === input.id) ?? null;
     }
