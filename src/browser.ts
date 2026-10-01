@@ -57,10 +57,11 @@ export class BrowserSessionManager {
   private readonly logger: Pick<Console, 'error'>;
   private context: BrowserContext | undefined;
   private lastAssessment: ProviderSessionAssessment = 'session_unknown';
-  private lastLaunchError: string | undefined;
+  private lastFailure: string | undefined;
   private closed = false;
   private queue: Promise<void> = Promise.resolve();
   private closePromise: Promise<void> | undefined;
+  private pendingTeardown: Promise<void> | undefined;
 
   constructor(options: BrowserSessionOptions = {}) {
     const configuredProfileDir = options.profileDir ?? process.env.BROWSER_PROFILE_DIR;
@@ -103,13 +104,13 @@ export class BrowserSessionManager {
         browserStarted: true
       };
     }
-    if (this.lastLaunchError) {
+    if (this.lastFailure) {
       return {
         status: 'browser_unavailable',
         profileDir: this.profileDir,
         profileExisted: this.profileExisted,
         browserStarted: false,
-        reason: this.lastLaunchError
+        reason: this.lastFailure
       };
     }
     return {
@@ -135,14 +136,16 @@ export class BrowserSessionManager {
       const context = await this.ensureContext(signal);
       if (signal.aborted) throw signal.reason ?? new Error('Browser operation aborted');
       const pagePromise = context.newPage();
-      const page = await this.settle(pagePromise);
-      if (!page) {
+      const acquired = await this.settle(pagePromise);
+      if (!acquired.settled) {
         void pagePromise.then(
           (latePage) => this.settleIgnoring(latePage.close().catch(() => undefined)),
           () => undefined
         );
+        this.discardContext('Browser did not provide a page in time');
         throw new BrowserUnavailableError('Browser did not provide a page in time');
       }
+      const page = acquired.value;
       if (signal.aborted) {
         await this.settleIgnoring(page.close().catch(() => undefined));
         throw signal.reason ?? new Error('Browser operation aborted');
@@ -163,7 +166,8 @@ export class BrowserSessionManager {
         }), aborted]);
       } finally {
         signal.removeEventListener('abort', onAbort);
-        await this.settleIgnoring(abortClose ?? page.close().catch(() => undefined));
+        const closed = await this.settle(abortClose ?? page.close().catch(() => undefined));
+        if (!closed.settled) this.discardContext('Browser did not close a page in time');
       }
     });
   }
@@ -171,22 +175,27 @@ export class BrowserSessionManager {
   close(): Promise<void> {
     if (this.closePromise) return this.closePromise;
     this.closed = true;
-    const context = this.context;
-    this.context = undefined;
     this.closePromise = (async () => {
+      if (this.pendingTeardown) {
+        const teardown = this.pendingTeardown;
+        this.pendingTeardown = undefined;
+        await teardown;
+      }
+      const context = this.context;
+      this.context = undefined;
       if (!context) return;
       await this.settleIgnoring(context.close().catch(() => undefined));
     })();
     return this.closePromise;
   }
 
-  private async settle<T>(promise: Promise<T>): Promise<T | undefined> {
+  private async settle<T>(promise: Promise<T>): Promise<{ settled: true; value: T } | { settled: false }> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       return await Promise.race([
-        promise,
-        new Promise<undefined>((resolve) => {
-          timer = setTimeout(() => resolve(undefined), this.settleTimeoutMs);
+        promise.then((value) => ({ settled: true as const, value })),
+        new Promise<{ settled: false }>((resolve) => {
+          timer = setTimeout(() => resolve({ settled: false }), this.settleTimeoutMs);
         })
       ]);
     } finally {
@@ -198,6 +207,15 @@ export class BrowserSessionManager {
     await this.settle(promise);
   }
 
+  private discardContext(reason: string): void {
+    const context = this.context;
+    if (!context) return;
+    this.context = undefined;
+    this.lastAssessment = 'session_unknown';
+    this.lastFailure = reason;
+    this.pendingTeardown = this.settleIgnoring(context.close().catch(() => undefined));
+  }
+
   private enqueue<T>(fn: () => Promise<T>): Promise<T> {
     const result = this.queue.then(fn, fn);
     this.queue = result.then(() => undefined, () => undefined);
@@ -206,6 +224,11 @@ export class BrowserSessionManager {
 
   private async ensureContext(signal: AbortSignal): Promise<BrowserContext> {
     if (this.closed) throw new BrowserUnavailableError('Browser session is closed');
+    if (this.pendingTeardown) {
+      const teardown = this.pendingTeardown;
+      this.pendingTeardown = undefined;
+      await teardown;
+    }
     if (this.context) return this.context;
     if (signal.aborted) throw signal.reason ?? new Error('Browser operation aborted');
 
@@ -229,16 +252,16 @@ export class BrowserSessionManager {
         if (this.context === context) {
           this.context = undefined;
           this.lastAssessment = 'session_unknown';
-          if (!this.closed) this.lastLaunchError = 'Browser session closed unexpectedly';
+          if (!this.closed) this.lastFailure = 'Browser session closed unexpectedly';
         }
       });
-      this.lastLaunchError = undefined;
+      this.lastFailure = undefined;
       return context;
     } catch (error) {
       if (error instanceof BrowserUnavailableError && this.closed) throw error;
       if (signal.aborted && error === signal.reason) throw error;
       const reason = safeErrorMessage(error);
-      this.lastLaunchError = reason;
+      this.lastFailure = reason;
       this.logger.error(`Browser launch failed: ${reason}`);
       throw new BrowserUnavailableError(reason);
     }

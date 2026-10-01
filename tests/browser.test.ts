@@ -145,15 +145,17 @@ describe.skipIf(!browserAvailable)('browser session manager', () => {
 
     await expect(operation).rejects.toThrow('test cancellation');
     expect(Date.now() - startedAt).toBeLessThan(2_000);
+    expect(manager.getInfo()).toMatchObject({ status: 'browser_unavailable', browserStarted: false });
     await expect(manager.runExclusive(new AbortController().signal, async (page) => {
       await page.goto(`${synthetic.origin}/`);
       return page.title();
     })).resolves.toBe('synthetic');
   });
 
-  it('bounds a hanging context page creation', async () => {
+  it('discards and relaunches after a hanging context page creation', async () => {
     const manager = createManager({ settleTimeoutMs: 200 });
     await manager.runExclusive(new AbortController().signal, async (page) => {
+      manager.assessSession('session_usable');
       page.context().newPage = () => new Promise<typeof page>(() => undefined);
     });
 
@@ -161,6 +163,12 @@ describe.skipIf(!browserAvailable)('browser session manager', () => {
     await expect(manager.runExclusive(new AbortController().signal, async () => undefined))
       .rejects.toBeInstanceOf(BrowserUnavailableError);
     expect(Date.now() - startedAt).toBeLessThan(2_000);
+    expect(manager.getInfo()).toMatchObject({ status: 'browser_unavailable', browserStarted: false });
+    await expect(manager.runExclusive(new AbortController().signal, async (page) => {
+      await page.goto(`${synthetic.origin}/`);
+      return page.title();
+    })).resolves.toBe('synthetic');
+    expect(manager.getInfo().status).toBe('session_unknown');
   });
 
   it('cancels an in-flight page operation and releases the mutex', async () => {
