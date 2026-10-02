@@ -5,11 +5,25 @@ export {
   BROWSER_SESSION_STATUSES,
   BrowserSessionManager,
   BrowserUnavailableError,
+  PROVIDER_SESSION_ASSESSMENTS,
   type BrowserSessionInfo,
   type BrowserSessionOptions,
   type BrowserSessionStatus,
   type ProviderSessionAssessment
 } from './browser.js';
+export {
+  FACEBOOK_ORIGIN,
+  FACEBOOK_MARKETPLACE_PATH,
+  FACEBOOK_PROBE_OUTCOMES,
+  FacebookSessionProbe,
+  classifyFacebookSession,
+  toProviderSessionAssessment,
+  type FacebookProbeOutcome,
+  type FacebookProbeCode,
+  type FacebookSessionProbeResult,
+  type FacebookSessionProbeOptions,
+  type FacebookPageSnapshot
+} from './facebook.js';
 export { FIXTURE_LISTINGS } from './fixtures.js';
 export { createMarketplaceService, listen, type MarketplaceService, type ServiceOptions } from './service.js';
 export * from './domain.js';

@@ -1,6 +1,7 @@
 import { z } from 'zod';
+import { PROVIDER_SESSION_ASSESSMENTS } from './browser.js';
 
-export const SCHEMA_VERSION = '1.0.0';
+export const SCHEMA_VERSION = '1.1.0';
 export const SERVICE_VERSION = '0.1.0';
 export const MAX_QUERY_LENGTH = 256;
 export const MAX_LOCATION_LENGTH = 256;
@@ -115,11 +116,16 @@ export const fetchSuccessSchema = z.object({
   listing: listingSchema
 }).strict();
 
+export const facebookSessionSchema = z.object({
+  status: z.enum(PROVIDER_SESSION_ASSESSMENTS)
+}).strict();
+
 export const statusSuccessSchema = z.object({
   ok: z.literal(true),
   service_version: z.literal(SERVICE_VERSION),
   schema_version: z.literal(SCHEMA_VERSION),
-  backend: backendNameSchema
+  backend: backendNameSchema,
+  facebook_session: facebookSessionSchema.optional()
 }).strict();
 
 export const searchOutputSchema = z.union([searchSuccessSchema, runtimeFailureSchema]);

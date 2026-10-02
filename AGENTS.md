@@ -6,4 +6,5 @@
 - The fixture backend is synthetic only. Never fetch a supplied listing URL; serve only on trusted private networks. Any `Origin` header is rejected until browser access has an explicit origin policy.
 - Backends expose a bounded non-empty `name`; provider failures must use validated `ProviderError` values. Search/fetch backend calls receive an abort signal and obey the configured deadline, while recognizing arbitrary promises cannot be forcibly cancelled.
 - Browser runtime uses one serialized persistent-profile browser; never store Facebook credentials, log cookies/localStorage/headers/page content/profile contents, or expose CDP. Browser work must honor the abort signal, and the fixture backend stays the default.
+- The Facebook session probe only classifies session state; it never automates login or stores/exports credentials. Ambiguous or failed probes remain `session_unknown`, never usable. Keep origin injection an internal test seam, and never log page content, cookies, storage, headers, or form values.
 - Development checks: `npm ci --ignore-scripts`, `npm run build`, `npm run typecheck`, `npm test`, and `npm run lint`.
