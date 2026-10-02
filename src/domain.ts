@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { PROVIDER_SESSION_ASSESSMENTS } from './browser.js';
 
-export const SCHEMA_VERSION = '1.0.0';
+export const SCHEMA_VERSION = '1.1.0';
 export const SERVICE_VERSION = '0.1.0';
 export const MAX_QUERY_LENGTH = 256;
 export const MAX_LOCATION_LENGTH = 256;

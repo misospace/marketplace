@@ -25,6 +25,8 @@ export interface FacebookPageSnapshot {
   hasCaptchaFrame: boolean;
   hasMainLandmark: boolean;
   hasMarketplaceLink: boolean;
+  hasAuthenticatedMarker: boolean;
+  hasLoginPrompt: boolean;
   mentionsCheckpoint: boolean;
   mentionsCaptcha: boolean;
 }
@@ -123,8 +125,11 @@ export function classifyFacebookSession(snapshot: FacebookPageSnapshot, baseUrl:
       code: 'LOGIN_REQUIRED'
     };
   }
-  if (isMarketplaceUrl(snapshot.url, baseUrl) && snapshot.hasMainLandmark && snapshot.hasMarketplaceLink) {
+  if (isMarketplaceUrl(snapshot.url, baseUrl) && snapshot.hasMainLandmark && snapshot.hasMarketplaceLink && snapshot.hasAuthenticatedMarker) {
     return { status: 'session_usable', outcome: 'marketplace_authenticated' };
+  }
+  if (snapshot.hasLoginPrompt) {
+    return { status: 'session_needs_reauth', outcome: 'login_required', code: 'LOGIN_REQUIRED' };
   }
   return { status: 'session_unknown', outcome: 'ambiguous' };
 }
@@ -136,13 +141,17 @@ export function toProviderSessionAssessment(info: BrowserSessionInfo): ProviderS
 }
 
 async function readFacebookPage(page: Page): Promise<FacebookPageSnapshot> {
-  const [passwordCount, loginCount, checkpointCount, captchaCount, mainCount, marketplaceLinkCount, checkpointTextCount, captchaTextCount, url] = await Promise.all([
+  const [passwordCount, loginCount, checkpointCount, captchaCount, mainCount, marketplaceLinkCount, authMarkerCount, logoutLinkCount, loginPromptLinkCount, loginPromptButtonCount, checkpointTextCount, captchaTextCount, url] = await Promise.all([
     page.locator('input[type="password"]').count(),
     page.locator('form[action*="/login"], input[name="pass"]').count(),
     page.locator('form[action*="checkpoint"], [data-testid*="checkpoint"]').count(),
     page.locator('iframe[src*="captcha" i], [id*="captcha" i], [data-testid*="captcha" i]').count(),
     page.locator('main, [role="main"]').count(),
     page.locator('a[href*="/marketplace"]').count(),
+    page.locator('a[href*="logout" i], [aria-label*="your account" i], [aria-label*="your profile" i]').count(),
+    page.getByRole('link', { name: /^\s*log ?out\s*$/i }).count(),
+    page.getByRole('link', { name: /^\s*log ?in( to facebook)?\s*$/i }).count(),
+    page.getByRole('button', { name: /^\s*log ?in( to facebook)?\s*$/i }).count(),
     page.getByText(/security check|confirm your identity|unusual activity/i).count(),
     page.getByText(/captcha|i'?m not a robot|verify you are a human/i).count(),
     page.url()
@@ -156,15 +165,17 @@ async function readFacebookPage(page: Page): Promise<FacebookPageSnapshot> {
     hasCaptchaFrame: captchaCount > 0,
     hasMainLandmark: mainCount > 0,
     hasMarketplaceLink: marketplaceLinkCount > 0,
+    hasAuthenticatedMarker: authMarkerCount > 0 || logoutLinkCount > 0,
+    hasLoginPrompt: loginPromptLinkCount > 0 || loginPromptButtonCount > 0,
     mentionsCheckpoint: checkpointTextCount > 0,
     mentionsCaptcha: captchaTextCount > 0
   };
 }
 
 function hasDecisiveSignal(snapshot: FacebookPageSnapshot, baseUrl: string): boolean {
-  return snapshot.hasPasswordInput || snapshot.hasLoginForm || snapshot.hasCheckpointForm || snapshot.hasCaptchaFrame ||
+  return snapshot.hasPasswordInput || snapshot.hasLoginForm || snapshot.hasCheckpointForm || snapshot.hasCaptchaFrame || snapshot.hasLoginPrompt ||
     snapshot.mentionsCheckpoint || snapshot.mentionsCaptcha || isLoginUrl(snapshot.url) || isCheckpointUrl(snapshot.url) ||
-    (isMarketplaceUrl(snapshot.url, baseUrl) && snapshot.hasMainLandmark && snapshot.hasMarketplaceLink);
+    (isMarketplaceUrl(snapshot.url, baseUrl) && snapshot.hasMainLandmark && snapshot.hasMarketplaceLink && snapshot.hasAuthenticatedMarker);
 }
 
 function isLoginUrl(value: string): boolean {

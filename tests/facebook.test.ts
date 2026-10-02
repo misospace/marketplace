@@ -20,7 +20,7 @@ if (!browserAvailable && process.env.REQUIRE_BROWSER_TESTS === '1') {
   throw new Error('Chromium is required for browser tests at ' + chromium.executablePath());
 }
 
-type SyntheticMode = 'authenticated' | 'login' | 'login-page' | 'checkpoint' | 'captcha' | 'ambiguous' | 'slow';
+type SyntheticMode = 'authenticated' | 'logged-out-shell' | 'login' | 'login-page' | 'checkpoint' | 'captcha' | 'ambiguous' | 'slow';
 
 type SyntheticServer = {
   server: Server;
@@ -57,6 +57,8 @@ const baseSnapshot = (overrides: Partial<FacebookPageSnapshot> = {}): FacebookPa
   hasCaptchaFrame: false,
   hasMainLandmark: true,
   hasMarketplaceLink: true,
+  hasAuthenticatedMarker: true,
+  hasLoginPrompt: false,
   mentionsCheckpoint: false,
   mentionsCaptcha: false,
   ...overrides
@@ -65,6 +67,10 @@ const baseSnapshot = (overrides: Partial<FacebookPageSnapshot> = {}): FacebookPa
 describe('Facebook session classification', () => {
   it.each([
     ['authenticated Marketplace page', baseSnapshot(), 'session_usable', 'marketplace_authenticated', undefined],
+    ['Marketplace chrome without authentication marker', baseSnapshot({ hasAuthenticatedMarker: false }), 'session_unknown', 'ambiguous', undefined],
+    ['Marketplace chrome with login prompt but no auth marker', baseSnapshot({ hasAuthenticatedMarker: false, hasLoginPrompt: true }), 'session_needs_reauth', 'login_required', 'LOGIN_REQUIRED'],
+    ['authentication marker wins over login prompt', baseSnapshot({ hasLoginPrompt: true }), 'session_usable', 'marketplace_authenticated', undefined],
+    ['login prompt on a non-Marketplace path', baseSnapshot({ url: 'http://127.0.0.1:3210/something-else', hasLoginPrompt: true }), 'session_needs_reauth', 'login_required', 'LOGIN_REQUIRED'],
     ['password input', baseSnapshot({ hasPasswordInput: true }), 'session_needs_reauth', 'login_required', 'LOGIN_REQUIRED'],
     ['login form', baseSnapshot({ hasLoginForm: true }), 'session_needs_reauth', 'login_required', 'LOGIN_REQUIRED'],
     ['login redirect URL', baseSnapshot({ url: 'http://127.0.0.1:3210/login/' }), 'session_needs_reauth', 'login_redirect', 'LOGIN_REQUIRED'],
@@ -166,6 +172,16 @@ describe.skipIf(!browserAvailable)('Facebook session probe', () => {
     const result = await createProbe(createManager()).probeSession(new AbortController().signal);
 
     expect(result).toEqual({ status: 'session_needs_reauth', outcome: 'login_required', code: 'LOGIN_REQUIRED' });
+  });
+
+  it('classifies a logged-out Marketplace shell as requiring login', async () => {
+    synthetic.setMode('logged-out-shell');
+    const manager = createManager();
+    const result = await createProbe(manager).probeSession(new AbortController().signal);
+
+    expect(result).not.toMatchObject({ status: 'session_usable' });
+    expect(result).toEqual({ status: 'session_needs_reauth', outcome: 'login_required', code: 'LOGIN_REQUIRED' });
+    expect(manager.getInfo().status).toBe('session_needs_reauth');
   });
 
   it('classifies a checkpoint redirect', async () => {
@@ -366,7 +382,11 @@ async function startSyntheticServer(): Promise<SyntheticServer> {
       response.end('<!doctype html><html><body><div>Loading</div></body></html>');
       return;
     }
-    response.end('<!doctype html><html><body><main><h1>Marketplace</h1><a href="/marketplace/category/1">Cars</a></main></body></html>');
+    if (pathname === '/marketplace/' && mode === 'logged-out-shell') {
+      response.end('<!doctype html><html><body><header><button>Log In</button></header><main><h1>Marketplace</h1><a href="/marketplace/category/1">Cars</a><p>Log in to continue</p></main></body></html>');
+      return;
+    }
+    response.end('<!doctype html><html><body><header><div aria-label="Your account"></div></header><main><h1>Marketplace</h1><a href="/marketplace/category/1">Cars</a></main></body></html>');
   });
 
   await new Promise<void>((resolve, reject) => {
