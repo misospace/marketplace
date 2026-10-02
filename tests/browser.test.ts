@@ -47,6 +47,114 @@ describe('browser launch args', () => {
       expect(() => new BrowserManager({ launchArgs: [argument] })).toThrow(TypeError);
     }
   });
+
+  it('does not reuse an interactive launch superseded by closeInteractive', async () => {
+    let releaseFirst!: () => void;
+    let launchCount = 0;
+    let firstContextClosed = false;
+    const firstLaunch = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const manager = new class extends BrowserManager {
+      loadPlaywright(): Promise<typeof import('playwright')> {
+        return Promise.resolve({
+          chromium: {
+            launchPersistentContext: async (_profileDir: string, options: { handleSIGINT?: boolean; handleSIGTERM?: boolean; handleSIGHUP?: boolean }) => {
+              expect(options).toMatchObject({ handleSIGINT: false, handleSIGTERM: false, handleSIGHUP: false });
+              launchCount += 1;
+              if (launchCount === 1) {
+                await firstLaunch;
+                return { close: async () => { firstContextClosed = true; }, once: () => undefined };
+              }
+              return { close: async () => undefined, once: () => undefined };
+            }
+          }
+        } as unknown as typeof import('playwright'));
+      }
+    }({ profileDir: makeProfileDir(), launchTimeoutMs: 100, settleTimeoutMs: 10 });
+    managers.push(manager);
+
+    await manager.beginInteractive();
+    const staleLaunch = manager.openInteractive({ headless: true });
+    await Promise.resolve();
+    const closeStartedAt = Date.now();
+    await manager.closeInteractive();
+    expect(Date.now() - closeStartedAt).toBeGreaterThanOrEqual(80);
+    manager.endInteractive();
+    await manager.beginInteractive();
+    const currentContext = await manager.openInteractive({ headless: true });
+    expect(launchCount).toBe(2);
+
+    releaseFirst();
+    await expect(staleLaunch).rejects.toBeInstanceOf(BrowserUnavailableError);
+    expect(firstContextClosed).toBe(true);
+    expect(manager.interactiveContext()).toBe(currentContext);
+  });
+
+  it('rejects openInteractive after closeInteractive invalidates ownership', async () => {
+    let launchCount = 0;
+    const manager = new class extends BrowserManager {
+      loadPlaywright(): Promise<typeof import('playwright')> {
+        return Promise.resolve({
+          chromium: {
+            launchPersistentContext: async () => {
+              launchCount += 1;
+              return { close: async () => undefined, once: () => undefined };
+            }
+          }
+        } as unknown as typeof import('playwright'));
+      }
+    }({ profileDir: makeProfileDir() });
+    managers.push(manager);
+
+    await manager.beginInteractive();
+    await manager.closeInteractive();
+    await expect(manager.openInteractive({ headless: true })).rejects.toMatchObject({
+      name: 'BrowserUnavailableError',
+      message: 'Interactive browser launch was superseded'
+    });
+    expect(launchCount).toBe(0);
+  });
+
+  it('passes only defined proxy variables into interactive Chromium', async () => {
+    const keys = ['HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy'] as const;
+    const previous = new Map(keys.map((key) => [key, process.env[key]]));
+    keys.forEach((key) => { delete process.env[key]; });
+    process.env.HTTP_PROXY = 'http://upper-proxy.example:8080';
+    process.env.http_proxy = 'http://lower-proxy.example:8080';
+    process.env.NO_PROXY = 'localhost';
+    let launchEnvironment: NodeJS.ProcessEnv | undefined;
+    const manager = new class extends BrowserManager {
+      loadPlaywright(): Promise<typeof import('playwright')> {
+        return Promise.resolve({
+          chromium: {
+            launchPersistentContext: async (_profileDir: string, options: { env?: NodeJS.ProcessEnv }) => {
+              launchEnvironment = options.env;
+              return { close: async () => undefined, once: () => undefined };
+            }
+          }
+        } as unknown as typeof import('playwright'));
+      }
+    }({ profileDir: makeProfileDir() });
+    managers.push(manager);
+    try {
+      await manager.beginInteractive();
+      await manager.openInteractive({ display: ':7' });
+      expect(launchEnvironment).toMatchObject({
+        DISPLAY: ':7',
+        HTTP_PROXY: 'http://upper-proxy.example:8080',
+        http_proxy: 'http://lower-proxy.example:8080',
+        NO_PROXY: 'localhost'
+      });
+      expect(launchEnvironment).not.toHaveProperty('HTTPS_PROXY');
+      expect(launchEnvironment).not.toHaveProperty('https_proxy');
+      expect(launchEnvironment).not.toHaveProperty('no_proxy');
+    } finally {
+      await manager.close();
+      for (const [key, value] of previous) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
 });
 
 describe.skipIf(!browserAvailable)('browser session manager', () => {
@@ -86,6 +194,70 @@ describe.skipIf(!browserAvailable)('browser session manager', () => {
     })).resolves.toBe('synthetic');
     expect(manager.getInfo().browserStarted).toBe(true);
     expect(manager.getInfo().status).toBe('session_unknown');
+  });
+
+  it('invalidates an in-flight headless launch when reauth starts', async () => {
+    class DelayedLaunchManager extends BrowserManager {
+      private launchStarted!: () => void;
+      private releaseLaunch!: () => void;
+      readonly didStartLaunch = new Promise<void>((resolve) => { this.launchStarted = resolve; });
+      readonly launchGate = new Promise<void>((resolve) => { this.releaseLaunch = resolve; });
+      contextClosed = false;
+
+      loadPlaywright(): Promise<typeof import('playwright')> {
+        return Promise.resolve({
+          chromium: {
+            launchPersistentContext: async () => {
+              this.launchStarted();
+              await this.launchGate;
+              return { close: async () => { this.contextClosed = true; } };
+            }
+          }
+        } as unknown as typeof import('playwright'));
+      }
+
+      finishLaunch(): void {
+        this.releaseLaunch();
+      }
+    }
+    const manager = new DelayedLaunchManager({
+      profileDir: makeProfileDir(),
+      launchTimeoutMs: 1_000,
+      settleTimeoutMs: 20,
+      logger: { error: () => undefined }
+    });
+    managers.push(manager);
+    const operation = manager.runExclusive(new AbortController().signal, async () => undefined);
+    await manager.didStartLaunch;
+    const begin = manager.beginInteractive();
+    expect(manager.getInfo().interactive).toBe(true);
+    manager.finishLaunch();
+    await expect(operation).rejects.toBeInstanceOf(BrowserUnavailableError);
+    await expect(begin).resolves.toBeUndefined();
+    expect(manager.contextClosed).toBe(true);
+    expect(manager.interactiveContext()).toBeUndefined();
+    await manager.endInteractive();
+  });
+
+  it('takes interactive ownership immediately and releases it for headless work', async () => {
+    const manager = createManager();
+    await manager.runExclusive(new AbortController().signal, async (page) => {
+      await page.goto(`${synthetic.origin}/`);
+    });
+    manager.assessSession('session_usable');
+
+    await manager.beginInteractive();
+    expect(manager.getInfo()).toMatchObject({ status: 'session_unknown', interactive: true, browserStarted: false });
+    const startedAt = Date.now();
+    await expect(manager.runExclusive(new AbortController().signal, async () => undefined))
+      .rejects.toBeInstanceOf(BrowserUnavailableError);
+    expect(Date.now() - startedAt).toBeLessThan(250);
+
+    await manager.endInteractive();
+    await expect(manager.runExclusive(new AbortController().signal, async (page) => {
+      await page.goto(`${synthetic.origin}/`);
+      return page.title();
+    })).resolves.toBe('synthetic');
   });
 
   it('persists localStorage and persistent cookies across browser restarts', async () => {

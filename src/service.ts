@@ -7,12 +7,18 @@ import { backendNameSchema, SERVICE_VERSION } from './domain.js';
 import { BrowserSessionManager } from './browser.js';
 import { FacebookSessionProbe, toProviderSessionAssessment } from './facebook.js';
 import { registerMarketplaceTools } from './tools.js';
+import { ReauthManager, ProcessReauthRuntime, REAUTH_LEASE_DEFAULT_MS, REAUTH_LEASE_MAX_MS, type ReauthRuntime } from './reauth.js';
+import { createReauthAdminServer, type ReauthAdminServer } from './admin.js';
 
 const MAX_REQUEST_BODY_SIZE = 64 * 1024;
+const REAUTH_SHUTDOWN_TIMEOUT_MS = 10_000;
 const BODY_ERROR = Symbol('body-error');
 const HOST = parseHost(process.env.HOST);
 const PORT = parsePort(process.env.PORT);
 const BACKEND_TIMEOUT_MS = parseBackendTimeout(process.env.BACKEND_TIMEOUT_MS);
+const REAUTH_ADMIN_PORT = parseConfiguredPort(process.env.REAUTH_ADMIN_PORT, 'REAUTH_ADMIN_PORT', 8787);
+const REAUTH_VIEWER_PORT = parseConfiguredPort(process.env.REAUTH_VIEWER_PORT, 'REAUTH_VIEWER_PORT', 6080);
+const REAUTH_LEASE_MS = parseReauthLease(process.env.REAUTH_LEASE_MS);
 
 export interface ServiceOptions {
   backend?: MarketplaceBackend;
@@ -22,6 +28,13 @@ export interface ServiceOptions {
   backendTimeoutMs?: number;
   browser?: BrowserSessionManager;
   browserProfileDir?: string;
+  reauth?: ReauthManager;
+  adminPort?: number;
+  reauthLeaseMs?: number;
+  reauthViewerPort?: number;
+  /** Internal dependency/test seams; not environment variables or tool inputs. */
+  reauthTargetUrl?: string;
+  reauthRuntime?: ReauthRuntime;
   /** Internal dependency/test seam; not an environment variable or tool input. */
   facebookBaseUrl?: string;
 }
@@ -32,6 +45,8 @@ export interface MarketplaceService {
   readonly port: number;
   readonly browser: BrowserSessionManager;
   readonly facebook: FacebookSessionProbe;
+  readonly reauth: ReauthManager;
+  readonly admin: ReauthAdminServer;
   close(): Promise<void>;
   address(): ReturnType<HttpServer['address']>;
 }
@@ -59,6 +74,26 @@ export function createMarketplaceService(options: ServiceOptions = {}): Marketpl
     ...(options.facebookBaseUrl !== undefined ? { baseUrl: options.facebookBaseUrl } : {}),
     logger
   });
+  const adminPort = options.adminPort ?? REAUTH_ADMIN_PORT;
+  const viewerPort = options.reauthViewerPort ?? REAUTH_VIEWER_PORT;
+  const leaseMs = options.reauthLeaseMs ?? REAUTH_LEASE_MS;
+  validateServicePort(adminPort, 'adminPort');
+  validateServicePort(viewerPort, 'reauthViewerPort');
+  if (!Number.isSafeInteger(leaseMs) || leaseMs <= 0 || leaseMs > REAUTH_LEASE_MAX_MS) {
+    throw new RangeError(`reauthLeaseMs must be a positive safe integer no greater than ${REAUTH_LEASE_MAX_MS}`);
+  }
+  const reauth = options.reauth ?? new ReauthManager({
+    browser,
+    runtime: options.reauthRuntime ?? new ProcessReauthRuntime(),
+    ...(options.reauthTargetUrl !== undefined ? { targetUrl: options.reauthTargetUrl } : {}),
+    ...(viewerPort > 0 ? { viewerPort } : {}),
+    leaseMs,
+    logger: {
+      error: (...args: Parameters<Console['error']>) => logger.error(...args),
+      info: () => undefined
+    }
+  });
+  const admin = createReauthAdminServer({ reauth, port: adminPort, logger });
   const active = new Set<{ mcp: Server; transport: StreamableHTTPServerTransport }>();
   let shuttingDown = false;
   const shutdownController = new AbortController();
@@ -182,6 +217,14 @@ export function createMarketplaceService(options: ServiceOptions = {}): Marketpl
     shuttingDown = true;
     shutdownController.abort(new Error('Service shutting down'));
     closePromise = (async () => {
+      await stopReauthBounded(reauth, logger);
+      await admin.close().catch((error: unknown) => {
+        try {
+          logger.error('Reauth admin shutdown failed:', error instanceof Error ? error.name : 'UnknownError');
+        } catch {
+          // Continue the remaining service teardown if logging fails.
+        }
+      });
       const closing = new Promise<void>((resolve, reject) => {
         if (!httpServer.listening) return resolve();
         httpServer.close((error) => error ? reject(error) : resolve());
@@ -202,6 +245,8 @@ export function createMarketplaceService(options: ServiceOptions = {}): Marketpl
     port,
     browser,
     facebook,
+    reauth,
+    admin,
     address: () => httpServer.address(),
     close
   };
@@ -231,6 +276,30 @@ function parsePort(value: string | undefined): number {
   const port = Number(value);
   if (!Number.isSafeInteger(port) || port > 65_535) throw new RangeError('PORT must be an integer between 0 and 65535');
   return port;
+}
+
+function parseConfiguredPort(value: string | undefined, name: string, defaultPort: number): number {
+  if (value === undefined) return defaultPort;
+  if (!/^\d+$/.test(value)) throw new RangeError(`${name} must be an integer between 0 and 65535`);
+  const port = Number(value);
+  if (!Number.isSafeInteger(port) || port > 65_535) throw new RangeError(`${name} must be an integer between 0 and 65535`);
+  return port;
+}
+
+function parseReauthLease(value: string | undefined): number {
+  if (value === undefined) return REAUTH_LEASE_DEFAULT_MS;
+  if (!/^\d+$/.test(value)) throw new RangeError(`REAUTH_LEASE_MS must be a positive safe integer no greater than ${REAUTH_LEASE_MAX_MS}`);
+  const leaseMs = Number(value);
+  if (!Number.isSafeInteger(leaseMs) || leaseMs <= 0 || leaseMs > REAUTH_LEASE_MAX_MS) {
+    throw new RangeError(`REAUTH_LEASE_MS must be a positive safe integer no greater than ${REAUTH_LEASE_MAX_MS}`);
+  }
+  return leaseMs;
+}
+
+function validateServicePort(port: number, name: string): void {
+  if (!Number.isSafeInteger(port) || port < 0 || port > 65_535) {
+    throw new RangeError(`${name} must be an integer between 0 and 65535`);
+  }
 }
 
 function hasMalformedToolArguments(body: unknown): boolean {
@@ -294,11 +363,77 @@ async function readBoundedBody(request: IncomingMessage, response: ServerRespons
 }
 
 export async function listen(service: MarketplaceService): Promise<void> {
+  const results = await Promise.allSettled([
+    listenServer(service.server, service.port, service.host),
+    listenServer(service.admin.server, service.admin.port, service.admin.host)
+  ]);
+  const failure = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+  if (failure) {
+    await service.close().catch(() => undefined);
+    throw failure.reason;
+  }
+}
+
+export function installShutdownHandlers(service: MarketplaceService): void {
+  const shutdown = async (signal: 'SIGINT' | 'SIGTERM'): Promise<void> => {
+    console.log(`Received ${signal}; shutting down Marketplace fixture MCP.`);
+    try {
+      await service.close();
+      process.exitCode = 0;
+    } catch (error) {
+      console.error('Marketplace fixture MCP shutdown failed:', error);
+      process.exitCode = 1;
+    }
+  };
+  process.once('SIGINT', () => void shutdown('SIGINT'));
+  process.once('SIGTERM', () => void shutdown('SIGTERM'));
+}
+
+async function listenServer(server: HttpServer, port: number, host: string): Promise<void> {
   await new Promise<void>((resolve, reject) => {
-    service.server.once('error', reject);
-    service.server.listen(service.port, service.host, () => {
-      service.server.off('error', reject);
+    const onError = (error: Error): void => {
+      server.off('listening', onListening);
+      reject(error);
+    };
+    const onListening = (): void => {
+      server.off('error', onError);
       resolve();
-    });
+    };
+    server.once('error', onError);
+    server.once('listening', onListening);
+    server.listen(port, host);
   });
+}
+
+async function stopReauthBounded(reauth: ReauthManager, logger: Pick<Console, 'error'>): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let timedOut = false;
+  try {
+    await Promise.race([
+      Promise.resolve().then(() => reauth.stop()).catch((error: unknown) => {
+        try {
+          logger.error('Reauth shutdown failed:', error instanceof Error ? error.name : 'UnknownError');
+        } catch {
+          // Shutdown remains best-effort if a custom logger fails.
+        }
+      }),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(() => {
+          timedOut = true;
+          resolve();
+        }, REAUTH_SHUTDOWN_TIMEOUT_MS);
+      })
+    ]);
+  } catch {
+    // Reauth shutdown must not prevent the remaining service teardown.
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+  if (timedOut) {
+    try {
+      logger.error('Reauth shutdown exceeded its deadline');
+    } catch {
+      // Shutdown remains best-effort if a custom logger fails.
+    }
+  }
 }

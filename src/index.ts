@@ -1,4 +1,4 @@
-import { createMarketplaceService, listen } from './service.js';
+import { createMarketplaceService, installShutdownHandlers, listen } from './service.js';
 
 export { FixtureBackend, ProviderError, type MarketplaceBackend } from './backend.js';
 export {
@@ -25,7 +25,21 @@ export {
   type FacebookPageSnapshot
 } from './facebook.js';
 export { FIXTURE_LISTINGS } from './fixtures.js';
-export { createMarketplaceService, listen, type MarketplaceService, type ServiceOptions } from './service.js';
+export { createMarketplaceService, installShutdownHandlers, listen, type MarketplaceService, type ServiceOptions } from './service.js';
+export {
+  ReauthManager,
+  ProcessReauthRuntime,
+  REAUTH_PHASES,
+  REAUTH_LEASE_DEFAULT_MS,
+  REAUTH_LEASE_MAX_MS,
+  type ReauthPhase,
+  type ReauthLease,
+  type ReauthStatus,
+  type ReauthProcessHandle,
+  type ReauthRuntime,
+  type ReauthManagerOptions
+} from './reauth.js';
+export { createReauthAdminServer, type ReauthAdminServer } from './admin.js';
 export * from './domain.js';
 
 const isMain = process.argv[1] !== undefined && import.meta.url === new URL(`file://${process.argv[1]}`).href;
@@ -33,16 +47,5 @@ const isMain = process.argv[1] !== undefined && import.meta.url === new URL(`fil
 if (isMain) {
   const service = createMarketplaceService();
   await listen(service);
-  const shutdown = async (signal: string): Promise<void> => {
-    console.log(`Received ${signal}; shutting down Marketplace fixture MCP.`);
-    try {
-      await service.close();
-      process.exitCode = 0;
-    } catch (error) {
-      console.error('Marketplace fixture MCP shutdown failed:', error);
-      process.exitCode = 1;
-    }
-  };
-  process.once('SIGINT', () => void shutdown('SIGINT'));
-  process.once('SIGTERM', () => void shutdown('SIGTERM'));
+  installShutdownHandlers(service);
 }
