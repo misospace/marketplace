@@ -158,6 +158,27 @@ describe('browser launch args', () => {
 });
 
 describe.skipIf(!browserAvailable)('browser session manager', () => {
+  it('bounds close when an interactive context refuses to close', async () => {
+    const manager = createManager({ settleTimeoutMs: 200, launchTimeoutMs: 5_000 });
+    await manager.beginInteractive();
+    const context = await manager.openInteractive({ headless: true });
+    const owner = context.browser();
+    expect(owner).not.toBeNull();
+    context.close = () => new Promise<void>(() => undefined);
+
+    const startedAt = Date.now();
+    await manager.closeInteractive();
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
+    expect(manager.interactiveContext()).toBeUndefined();
+    expect(manager.getInfo()).toMatchObject({ status: 'session_unknown', interactive: true, browserStarted: false });
+    expect(owner?.isConnected()).toBe(false);
+
+    manager.endInteractive();
+    await expect(manager.runExclusive(new AbortController().signal, async (page) => {
+      await page.goto('about:blank');
+    })).resolves.toBeUndefined();
+  });
+
   it('starts lazily and does not navigate before first use', async () => {
     const manager = createManager();
     expect(manager.getInfo().status).toBe('profile_missing');

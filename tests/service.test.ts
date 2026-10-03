@@ -142,6 +142,65 @@ describe('fixture MCP service', () => {
     }
   });
 
+  it.skipIf(!browserAvailable)('bounds a stalled interactive context close during service shutdown', async () => {
+    await Promise.allSettled(clients.splice(0).map((client) => client.close()));
+    await service.close();
+    const profileDir = mkdtempSync(join(tmpdir(), 'marketplace-service-reauth-stalled-close-'));
+    const browserProfileDir = join(profileDir, 'profile');
+    const logger = { error: vi.fn() };
+    const browser = new BrowserSessionManager({ profileDir: browserProfileDir, settleTimeoutMs: 200, launchTimeoutMs: 5_000, logger });
+    const runtime = new FakeReauthRuntime();
+    await startServiceWith({ name: 'reauth-stalled-close', search: () => [], fetch: () => null }, logger, undefined, browser, {
+      browserProfileDir,
+      reauthRuntime: runtime,
+      reauthAdminPort: 0,
+      reauthViewerPort: 0,
+      reauthTargetUrl
+    });
+    try {
+      const firstLease = await service.reauth.start();
+      const context = service.browser.interactiveContext();
+      expect(context).toBeDefined();
+      const owner = context?.browser();
+      expect(owner).not.toBeNull();
+      if (context) context.close = () => new Promise<void>(() => undefined);
+
+      const startedAt = Date.now();
+      await expectCompletesWithin(service.close(), 3_000);
+      expect(Date.now() - startedAt).toBeLessThan(3_000);
+      expect(service.reauth.status()).toMatchObject({ phase: 'idle', lease: null });
+      expect(service.browser.getInfo()).toMatchObject({ status: 'browser_unavailable', browserStarted: false });
+      expect(service.browser.getInfo().interactive).not.toBe(true);
+      expect(service.browser.interactiveContext()).toBeUndefined();
+      expect(owner?.isConnected()).toBe(false);
+      expect(logger.error).toHaveBeenCalledWith('Interactive browser context did not close within the configured timeout');
+      expect(runtime.children.every((child) => child.exitCode !== null || child.signalCode !== null)).toBe(true);
+
+      await expect(service.reauth.start()).rejects.toThrow('Browser session is closed');
+      expect(service.reauth.status()).toMatchObject({ phase: 'idle', lease: null });
+      expect(firstLease.id).toBeTruthy();
+
+      const nextRuntime = new FakeReauthRuntime();
+      await startServiceWith({ name: 'reauth-after-shutdown', search: () => [], fetch: () => null }, logger, undefined, undefined, {
+        browserProfileDir,
+        reauthRuntime: nextRuntime,
+        reauthAdminPort: 0,
+        reauthViewerPort: 0,
+        reauthTargetUrl
+      });
+      const nextLease = await service.reauth.start();
+      expect(nextLease.id).not.toBe(firstLease.id);
+      expect(service.reauth.status()).toMatchObject({ phase: 'active', lease: { id: nextLease.id } });
+      await service.reauth.stop();
+      expect(service.reauth.status()).toMatchObject({ phase: 'idle', lease: null });
+      await nextRuntime.stopAll();
+    } finally {
+      await service.close();
+      await runtime.stopAll();
+      rmSync(profileDir, { recursive: true, force: true });
+    }
+  }, 10_000);
+
   it.skipIf(!browserAvailable)('closes an active reauth lease and releases the profile during service shutdown', async () => {
     await Promise.allSettled(clients.splice(0).map((client) => client.close()));
     await service.close();
@@ -792,6 +851,20 @@ describe('fixture MCP service', () => {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+async function expectCompletesWithin<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`Operation did not complete within ${timeoutMs}ms`)), timeoutMs);
+      })
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 function isPidAlive(pid: number): boolean {

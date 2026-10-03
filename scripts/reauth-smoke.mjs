@@ -5,6 +5,7 @@ import { basename, join, resolve } from 'node:path';
 import { networkInterfaces, tmpdir } from 'node:os';
 import { createServer } from 'node:http';
 import { connect } from 'node:net';
+import { createCipheriv } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createMarketplaceService, installShutdownHandlers, listen } from '/app/dist/index.js';
 
@@ -150,6 +151,195 @@ function readRfbBanner(port) {
       reject(new Error('Timed out waiting for the local RFB banner'));
     });
   });
+}
+
+function reverseBits(value) {
+  let reversed = 0;
+  for (let bit = 0; bit < 8; bit += 1) reversed |= ((value >> bit) & 1) << (7 - bit);
+  return reversed;
+}
+
+function vncAuthResponse(password, challenge) {
+  const key = Buffer.alloc(8);
+  for (let index = 0; index < Math.min(password.length, key.length); index += 1) {
+    key[index] = reverseBits(password.charCodeAt(index) & 0xff);
+  }
+  const cipher = createCipheriv('des-ede3-ecb', Buffer.concat([key, key, key]), null);
+  cipher.setAutoPadding(false);
+  return Buffer.concat([cipher.update(challenge), cipher.final()]);
+}
+
+class WebSocketByteReader {
+  constructor(url) {
+    assert.equal(typeof WebSocket, 'function', 'Node does not provide the built-in WebSocket API');
+    this.socket = new WebSocket(url);
+    this.socket.binaryType = 'arraybuffer';
+    this.buffer = Buffer.alloc(0);
+    this.waiters = new Set();
+    this.failure = null;
+    this.closed = false;
+    this.opened = new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('Timed out opening the local RFB WebSocket')), 5_000);
+      this.socket.addEventListener('open', () => {
+        clearTimeout(timeout);
+        resolve();
+      }, { once: true });
+      this.socket.addEventListener('error', () => {
+        clearTimeout(timeout);
+        reject(new Error('Could not open the local RFB WebSocket'));
+      }, { once: true });
+      this.socket.addEventListener('close', () => {
+        clearTimeout(timeout);
+        reject(new Error('The local RFB WebSocket closed before opening'));
+      }, { once: true });
+    });
+    this.socket.addEventListener('message', (event) => {
+      const data = event.data;
+      if (data instanceof ArrayBuffer) this.buffer = Buffer.concat([this.buffer, Buffer.from(data)]);
+      else if (ArrayBuffer.isView(data)) this.buffer = Buffer.concat([this.buffer, Buffer.from(data.buffer, data.byteOffset, data.byteLength)]);
+      else {
+        this.failure = new Error('The RFB WebSocket returned a non-binary message');
+      }
+      this.notify();
+    });
+    this.socket.addEventListener('error', () => {
+      this.failure = new Error('The local RFB WebSocket failed');
+      this.notify();
+    });
+    this.socket.addEventListener('close', () => {
+      this.closed = true;
+      this.notify();
+    });
+  }
+
+  notify() {
+    for (const wake of this.waiters) wake();
+    this.waiters.clear();
+  }
+
+  async open() {
+    await this.opened;
+  }
+
+  send(data) {
+    this.socket.send(data);
+  }
+
+  async readExactly(size, timeoutMs = 10_000) {
+    assert.ok(Number.isInteger(size) && size >= 0);
+    const deadline = Date.now() + timeoutMs;
+    while (this.buffer.length < size) {
+      if (this.failure) throw this.failure;
+      if (this.closed) throw new Error('The RFB WebSocket closed before the response was complete');
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) throw new Error('Timed out reading the RFB WebSocket response');
+      await new Promise((resolve, reject) => {
+        const wake = () => {
+          clearTimeout(timeout);
+          this.waiters.delete(wake);
+          resolve();
+        };
+        const timeout = setTimeout(() => {
+          this.waiters.delete(wake);
+          reject(new Error('Timed out reading the RFB WebSocket response'));
+        }, remaining);
+        this.waiters.add(wake);
+      });
+    }
+    const result = this.buffer.subarray(0, size);
+    this.buffer = this.buffer.subarray(size);
+    return result;
+  }
+
+  close() {
+    if (this.socket.readyState === WebSocket.OPEN || this.socket.readyState === WebSocket.CONNECTING) this.socket.close();
+  }
+}
+
+async function readFramebufferUpdate(connection, width, height, bytesPerPixel) {
+  const request = Buffer.alloc(10);
+  request[0] = 3;
+  request.writeUInt16BE(width, 6);
+  request.writeUInt16BE(height, 8);
+  connection.send(Buffer.from([2, 0, 0, 1, 0, 0, 0, 0]));
+
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    connection.send(request);
+    while (true) {
+      const messageType = (await connection.readExactly(1))[0];
+      if (messageType === 0) {
+        await connection.readExactly(1);
+        const rectangleCount = (await connection.readExactly(2)).readUInt16BE(0);
+        for (let index = 0; index < rectangleCount; index += 1) {
+          const rectangle = await connection.readExactly(12);
+          const x = rectangle.readUInt16BE(0);
+          const y = rectangle.readUInt16BE(2);
+          const rectangleWidth = rectangle.readUInt16BE(4);
+          const rectangleHeight = rectangle.readUInt16BE(6);
+          const encoding = rectangle.readInt32BE(8);
+          assert.ok(x + rectangleWidth <= width && y + rectangleHeight <= height, 'RFB update rectangle exceeded the framebuffer');
+          if (rectangleWidth === 0 || rectangleHeight === 0) continue;
+          assert.equal(encoding, 0, 'The RFB server did not honor the requested raw framebuffer encoding');
+          await connection.readExactly(rectangleWidth * rectangleHeight * bytesPerPixel, 30_000);
+          return { width: rectangleWidth, height: rectangleHeight };
+        }
+        break;
+      }
+      if (messageType === 1) {
+        await connection.readExactly(3);
+        const colors = (await connection.readExactly(2)).readUInt16BE(0);
+        await connection.readExactly(colors * 6);
+      } else if (messageType === 2) {
+        // Bell has no payload.
+      } else if (messageType === 3) {
+        await connection.readExactly(3);
+        const length = (await connection.readExactly(4)).readUInt32BE(0);
+        await connection.readExactly(length);
+      } else {
+        assert.fail(`Unexpected RFB server message type ${messageType}`);
+      }
+    }
+  }
+  assert.fail('The RFB server did not send a framebuffer rectangle with non-zero area');
+}
+
+async function rfbHandshake(viewerPort, password, expectFramebuffer) {
+  const connection = new WebSocketByteReader(`ws://127.0.0.1:${viewerPort}/websockify`);
+  try {
+    await connection.open();
+    const banner = await connection.readExactly(12);
+    assert.equal(banner.toString('ascii'), 'RFB 003.008\n');
+    connection.send(Buffer.from('RFB 003.008\n', 'ascii'));
+
+    const securityTypeCount = (await connection.readExactly(1))[0];
+    assert.ok(securityTypeCount > 0, 'The RFB server offered no security types');
+    const securityTypes = await connection.readExactly(securityTypeCount);
+    assert.ok(securityTypes.includes(2), 'The RFB server did not offer VNC authentication');
+    connection.send(Buffer.from([2]));
+
+    const challenge = await connection.readExactly(16);
+    connection.send(vncAuthResponse(password, challenge));
+    const securityResult = (await connection.readExactly(4)).readUInt32BE(0);
+    if (!expectFramebuffer) return securityResult;
+
+    assert.equal(securityResult, 0, 'The console URL token did not authenticate with the RFB server');
+    connection.send(Buffer.from([1]));
+    const serverInit = await connection.readExactly(24);
+    const width = serverInit.readUInt16BE(0);
+    const height = serverInit.readUInt16BE(2);
+    const bitsPerPixel = serverInit[4];
+    assert.equal(width, 1280, 'The RFB framebuffer width did not match Xvfb');
+    assert.equal(height, 1024, 'The RFB framebuffer height did not match Xvfb');
+    assert.ok([8, 16, 32].includes(bitsPerPixel), 'The RFB framebuffer used an unsupported pixel size');
+    const nameLength = serverInit.readUInt32BE(20);
+    await connection.readExactly(nameLength);
+
+    const rectangle = await readFramebufferUpdate(connection, width, height, bitsPerPixel / 8);
+    assert.ok(rectangle.width > 0 && rectangle.height > 0, 'The RFB update contained no non-empty rectangle');
+    return securityResult;
+  } finally {
+    connection.close();
+  }
 }
 
 function parseOptionPort(argv, option) {
@@ -341,10 +531,15 @@ async function runSmoke() {
   viewerUrl.hash = '';
   const viewerResponse = await fetch(viewerUrl);
   assert.equal(viewerResponse.status, 200);
-  assert.ok((await viewerResponse.text()).toLowerCase().includes('novnc'));
+  assert.match(viewerResponse.headers.get('content-type') ?? '', /^text\/html\b/i);
+  assert.ok((await viewerResponse.text()).length > 0, 'The viewer page was empty');
+
+  assert.equal(await rfbHandshake(leaseViewerPort, token, true), 0);
+  const wrongPasswordResult = await rfbHandshake(leaseViewerPort, 'notright', false);
+  assert.notEqual(wrongPasswordResult, 0, 'The RFB server accepted an incorrect password');
+  writeSync(1, 'RFB negative control: rejected incorrect password\n');
   assertTokensNotLogged();
 
-  // This proves the configured proxy reaches a live RFB server, but does not perform the complete RFB security/authentication handshake.
   const stopped = await adminJson(adminPort, '/reauth/stop');
   assert.equal(stopped.response.status, 200);
   await waitUntil(() => runningChildren().length === 0, 'Re-auth child processes remained after stop');

@@ -216,7 +216,7 @@ export class BrowserSessionManager {
       }
       const context = this.context;
       this.context = undefined;
-      if (context) await this.settleIgnoring(context.close().catch(() => undefined));
+      if (context) await this.closePersistentContext(context, 'Headless browser context');
     })();
     this.interactiveBegin = begin;
     void begin.finally(() => {
@@ -270,7 +270,7 @@ export class BrowserSessionManager {
         env: interactiveBrowserEnvironment(options.display)
       });
       if (!this.interactive || this.closed || generation !== this.interactiveLaunchGeneration || options.signal?.aborted) {
-        await this.settleIgnoring(context.close().catch(() => undefined));
+        await this.closePersistentContext(context, 'Superseded interactive browser context');
         if (options.signal?.aborted) throw options.signal.reason ?? new Error('Browser operation aborted');
         throw new BrowserUnavailableError('Interactive browser ownership is no longer active');
       }
@@ -308,8 +308,11 @@ export class BrowserSessionManager {
     if (pendingLaunch) await this.settleIgnoring(pendingLaunch.catch(() => undefined), this.launchTimeoutMs);
     const context = this.interactiveBrowserContext;
     if (context) {
-      await context.close().catch(() => undefined);
-      if (this.interactiveBrowserContext === context) this.interactiveBrowserContext = undefined;
+      try {
+        await this.closePersistentContext(context, 'Interactive browser context');
+      } finally {
+        if (this.interactiveBrowserContext === context) this.interactiveBrowserContext = undefined;
+      }
     }
   }
 
@@ -330,9 +333,14 @@ export class BrowserSessionManager {
       }
       const context = this.context;
       this.context = undefined;
-      if (context) await this.settleIgnoring(context.close().catch(() => undefined));
-      await this.closeInteractive();
-      this.interactive = false;
+      try {
+        if (context) await this.closePersistentContext(context, 'Headless browser context');
+        await this.closeInteractive();
+      } finally {
+        this.interactiveBrowserContext = undefined;
+        this.interactive = false;
+        this.lastAssessment = 'session_unknown';
+      }
     })();
     return this.closePromise;
   }
@@ -356,6 +364,48 @@ export class BrowserSessionManager {
 
   private async settleIgnoring(promise: Promise<unknown>, timeoutMs = this.settleTimeoutMs): Promise<void> {
     await this.settle(promise, timeoutMs);
+  }
+
+  private async closePersistentContext(context: BrowserContext, label: string): Promise<void> {
+    let closeSettled = false;
+    let closeFailed = false;
+    const close = Promise.resolve().then(() => context.close()).then(
+      () => { closeSettled = true; },
+      () => { closeSettled = true; closeFailed = true; }
+    );
+    await this.settleIgnoring(close, this.settleTimeoutMs);
+    if (closeSettled && !closeFailed) return;
+
+    this.logCloseFailure(closeFailed ? `${label} failed to close` : `${label} did not close within the configured timeout`);
+    // The close is diagnostic only; do not poison the reusable session assessment.
+    let browser: ReturnType<BrowserContext['browser']>;
+    try {
+      browser = context.browser();
+    } catch {
+      this.logCloseFailure('Could not access the persistent browser for forced shutdown');
+      return;
+    }
+    if (!browser) return;
+
+    let browserCloseSettled = false;
+    let browserCloseFailed = false;
+    const browserClose = Promise.resolve().then(() => browser.close()).then(
+      () => { browserCloseSettled = true; },
+      () => { browserCloseSettled = true; browserCloseFailed = true; }
+    );
+    const forceCloseTimeoutMs = Math.min(this.settleTimeoutMs, 1_000);
+    await this.settleIgnoring(browserClose, forceCloseTimeoutMs);
+    if (!browserCloseSettled || browserCloseFailed) {
+      this.logCloseFailure('Persistent browser did not close within the configured timeout');
+    }
+  }
+
+  private logCloseFailure(message: string): void {
+    try {
+      this.logger.error(message);
+    } catch {
+      // Cleanup must continue even if a custom logger fails.
+    }
   }
 
   private discardContext(reason: string): void {
@@ -407,7 +457,7 @@ export class BrowserSessionManager {
           ...(this.launchArgs.length ? { args: this.launchArgs } : {})
         });
         if (this.closed || this.interactive || generation !== this.headlessLaunchGeneration) {
-          await context.close().catch(() => undefined);
+          await this.closePersistentContext(context, 'Superseded headless browser context');
           if (this.interactive || generation !== this.headlessLaunchGeneration) {
             throw new BrowserUnavailableError('Interactive reauth session owns the browser profile');
           }

@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path';
 import { createConnection } from 'node:net';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { chromium } from 'playwright';
-import { BrowserSessionManager, BrowserUnavailableError } from '../src/browser.js';
+import { BrowserSessionManager, BrowserUnavailableError, type BrowserSessionOptions } from '../src/browser.js';
 import { createReauthAdminServer } from '../src/admin.js';
 import { assertFacebookOrigin } from '../src/facebook.js';
 import { parseDisplayNumber, ReauthManager } from '../src/reauth.js';
@@ -50,10 +50,11 @@ function makeRuntime(): FakeReauthRuntime {
   return runtime;
 }
 
-function makeManager(): BrowserSessionManager {
+function makeManager(options: BrowserSessionOptions = {}): BrowserSessionManager {
   const parent = mkdtempSync(join(tmpdir(), 'marketplace-reauth-test-'));
   profileDirs.push(parent);
   const manager = new BrowserSessionManager({
+    ...options,
     profileDir: join(parent, 'profile'),
     logger: { error: () => undefined }
   });
@@ -224,6 +225,71 @@ browserTests('reauth manager with Chromium', () => {
     expect(reauth.status()).toMatchObject({ phase: 'active', lease: { id: second.id } });
     await reauth.stop();
   });
+
+  it('bounds a stalled interactive context close during stop and permits a later lease', async () => {
+    const browser = makeManager({ settleTimeoutMs: 200, launchTimeoutMs: 5_000 });
+    const runtime = makeRuntime();
+    const reauth = makeReauth(browser, runtime);
+    const firstLease = await reauth.start();
+    const context = browser.interactiveContext();
+    expect(context).toBeDefined();
+    const originalClose = context?.close.bind(context);
+    let releaseClose!: () => void;
+    if (context) context.close = () => new Promise<void>((resolve) => { releaseClose = resolve; });
+
+    try {
+      const startedAt = Date.now();
+      await expectCompletesWithin(reauth.stop(), 3_000);
+      expect(Date.now() - startedAt).toBeLessThan(3_000);
+      expect(reauth.status()).toMatchObject({ phase: 'idle', lease: null });
+      expect(browser.getInfo()).toMatchObject({ status: 'session_unknown', browserStarted: false });
+      expect(browser.getInfo().interactive).not.toBe(true);
+      expect(browser.interactiveContext()).toBeUndefined();
+
+      await browser.runExclusive(new AbortController().signal, async (page) => { await page.goto('about:blank'); });
+      expect(browser.getInfo().browserStarted).toBe(true);
+      const laterLease = await reauth.start();
+      expect(laterLease.id).not.toBe(firstLease.id);
+      expect(reauth.status()).toMatchObject({ phase: 'active', lease: { id: laterLease.id } });
+      await reauth.stop();
+    } finally {
+      if (context && originalClose) context.close = originalClose;
+      releaseClose?.();
+      await reauth.stop();
+    }
+  }, 10_000);
+
+  it('bounds a stalled interactive context close during TTL expiry and permits a later lease', async () => {
+    const browser = makeManager({ settleTimeoutMs: 200, launchTimeoutMs: 5_000 });
+    const runtime = makeRuntime();
+    const reauth = makeReauth(browser, runtime, { leaseMs: 100 });
+    const firstLease = await reauth.start();
+    const context = browser.interactiveContext();
+    expect(context).toBeDefined();
+    const originalClose = context?.close.bind(context);
+    let releaseClose!: () => void;
+    if (context) context.close = () => new Promise<void>((resolve) => { releaseClose = resolve; });
+
+    try {
+      const startedAt = Date.now();
+      await waitForPhase(reauth, 'idle', 3_000);
+      expect(Date.now() - startedAt).toBeLessThan(3_000);
+      expect(reauth.status()).toMatchObject({ phase: 'idle', lease: null, expiresAt: null });
+      expect(browser.getInfo()).toMatchObject({ status: 'session_unknown', browserStarted: false });
+      expect(browser.getInfo().interactive).not.toBe(true);
+      expect(browser.interactiveContext()).toBeUndefined();
+
+      const laterLease = await reauth.start();
+      expect(laterLease.id).not.toBe(firstLease.id);
+      expect(reauth.status()).toMatchObject({ phase: 'active', lease: { id: laterLease.id } });
+      await reauth.stop();
+      expect(runtime.children.every(isProcessGone)).toBe(true);
+    } finally {
+      if (context && originalClose) context.close = originalClose;
+      releaseClose?.();
+      await reauth.stop();
+    }
+  }, 10_000);
 
   it('expires a lease through the same cleanup path as stop', async () => {
     const browser = makeManager();
@@ -450,10 +516,24 @@ browserTests('reauth admin listener', () => {
   });
 });
 
-async function waitFor(predicate: () => boolean): Promise<void> {
-  const deadline = Date.now() + 3_000;
+async function waitFor(predicate: () => boolean, timeoutMs = 3_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
   while (!predicate() && Date.now() < deadline) await new Promise<void>((resolve) => setTimeout(resolve, 10));
   expect(predicate()).toBe(true);
+}
+
+async function expectCompletesWithin<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`Operation did not complete within ${timeoutMs}ms`)), timeoutMs);
+      })
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 async function disconnectDuringAdminBody(port: number): Promise<number> {
@@ -497,8 +577,8 @@ async function rawAdminRequest(port: number, path: string, headers: Record<strin
   });
 }
 
-async function waitForPhase(reauth: ReauthManager, phase: 'idle'): Promise<void> {
-  const deadline = Date.now() + 3_000;
+async function waitForPhase(reauth: ReauthManager, phase: 'idle', timeoutMs = 3_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
   while (reauth.status().phase !== phase && Date.now() < deadline) {
     await new Promise<void>((resolve) => setTimeout(resolve, 10));
   }
