@@ -56,6 +56,24 @@ The origin can be injected only through the constructor for tests (or the servic
 
 The probe is infrastructure for a future provider. No Marketplace search, listing parsing, Messenger, or watch state exists yet, and the fixture backend remains the default.
 
+## Manual re-auth console
+
+When a provider reports `LOGIN_REQUIRED`, `CAPTCHA_REQUIRED`, or `SESSION_INVALID`, an operator can temporarily take over the persistent browser profile and complete the challenge manually. This console is an operator-only side channel; it is not exposed through any MCP tool and does not change the tool contract.
+
+The loopback-only admin listener provides three JSON endpoints:
+
+- `POST /reauth/start` starts or returns the active lease.
+- `GET /reauth/status` reports the current lease state.
+- `POST /reauth/stop` ends the lease and returns the idle state.
+
+Successful responses have the shape `{ "phase": "active", "lease": { "id": "...", "startedAt": "...", "expiresAt": "...", "consoleUrl": "http://127.0.0.1:.../vnc.html?...#password=...", "viewerPort": 6080 }, "expiresAt": "...", "remainingMs": 600000 }`. Idle responses use `"phase": "idle"`, `"lease": null`, and null `expiresAt` and `remainingMs`. Failed operations return a generic JSON error without exposing internals.
+
+Configuration is through environment variables: `REAUTH_ADMIN_PORT` defaults to `8787`, `REAUTH_VIEWER_PORT` defaults to `6080`, and `REAUTH_LEASE_MS` defaults to `600000` (10 minutes). A lease must be a positive safe integer and cannot exceed `1800000` ms (30 minutes). The service options provide internal constructor/test seams for custom targets and runtimes; these are not environment variables or request inputs.
+
+The intended access path is `kubectl port-forward` for both the admin and viewer ports, then use the returned console URL from the operator's local machine. This admin interface is intentionally unauthenticated because both listeners bind only to `127.0.0.1`; never expose either port through a Kubernetes Service or Ingress. This project ships no Kubernetes manifests. In a container, configure port-forwarding to the pod's admin and viewer ports without changing their loopback binds.
+
+Each lease takes exclusive ownership of the one browser profile, so ordinary browser work fails fast instead of queueing until the lease ends. The console password is ephemeral and delivered only in the URL fragment, which browsers do not send to the viewer's HTTP access log. The password is held only for the lease; its file is mode `0600` inside a private temporary directory, and the directory and file are removed at teardown. Credentials and page content are never logged or stored by the service, and no CDP/remote-debugging endpoint is exposed. Closing the console does not mean the session is authenticated: stopping a lease resets the assessment to `session_unknown`, and the next ordinary probe must verify the session again.
+
 ## Development checks
 
 ```sh

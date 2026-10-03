@@ -1,8 +1,8 @@
-import { request as httpRequest } from 'node:http';
+import { createServer as createHttpServer, request as httpRequest } from 'node:http';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { CallToolResultSchema, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
@@ -16,19 +16,38 @@ import { createMarketplaceService, type MarketplaceService } from '../src/servic
 import { parseBackendTimeout } from '../src/service.js';
 import * as packageEntry from '../src/index.js';
 import { runBackendOperation } from '../src/tools.js';
+import { FakeReauthRuntime } from './helpers/fake-reauth-runtime.js';
 
 let service: MarketplaceService;
 let baseUrl: string;
 const originalFetch = globalThis.fetch;
 const browserAvailable = existsSync(chromium.executablePath());
 const clients: Client[] = [];
+let reauthTargetUrl = 'https://www.facebook.com/marketplace/';
+let syntheticReauthServer: ReturnType<typeof createHttpServer>;
+
+beforeAll(async () => {
+  syntheticReauthServer = createHttpServer((_request, response) => {
+    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end('<!doctype html><html><body>fixture</body></html>');
+  });
+  await new Promise<void>((resolve, reject) => {
+    syntheticReauthServer.once('error', reject);
+    syntheticReauthServer.listen(0, '127.0.0.1', resolve);
+  });
+  const address = syntheticReauthServer.address();
+  if (!address || typeof address === 'string') throw new Error('Expected synthetic reauth TCP address');
+  reauthTargetUrl = `http://127.0.0.1:${address.port}/marketplace`;
+});
+
+afterAll(async () => {
+  if (!syntheticReauthServer?.listening) return;
+  syntheticReauthServer.closeAllConnections();
+  await new Promise<void>((resolve, reject) => syntheticReauthServer.close((error) => error ? reject(error) : resolve()));
+});
 
 async function startService(backend?: MarketplaceBackend): Promise<void> {
-  service = createMarketplaceService({ host: '127.0.0.1', port: 0, ...(backend ? { backend } : {}) });
-  await new Promise<void>((resolve, reject) => {
-    service.server.once('error', reject);
-    service.server.listen(0, '127.0.0.1', resolve);
-  });
+  service = createMarketplaceService({ host: '127.0.0.1', port: 0, adminPort: 0, ...(backend ? { backend } : {}) });
+  await packageEntry.listen(service);
   const address = service.address();
   if (!address || typeof address === 'string') throw new Error('Expected a TCP address');
   baseUrl = `http://127.0.0.1:${address.port}`;
@@ -72,6 +91,200 @@ afterEach(async () => {
 });
 
 describe('fixture MCP service', () => {
+  it.skipIf(!browserAvailable)('serves the reauth console endpoints end-to-end on loopback', async () => {
+    await Promise.allSettled(clients.splice(0).map((client) => client.close()));
+    await service.close();
+    const profileDir = mkdtempSync(join(tmpdir(), 'marketplace-service-reauth-'));
+    const runtime = new FakeReauthRuntime();
+    await startServiceWith({ name: 'reauth-service', search: () => [], fetch: () => null }, { error: vi.fn() }, undefined, undefined, {
+      browserProfileDir: join(profileDir, 'profile'),
+      reauthRuntime: runtime,
+      reauthAdminPort: 0,
+      reauthViewerPort: 0,
+      reauthTargetUrl
+    });
+    try {
+      const adminAddress = service.admin.address();
+      if (!adminAddress || typeof adminAddress === 'string') throw new Error('Expected admin TCP address');
+      expect(service.admin.host).toBe('127.0.0.1');
+      expect(adminAddress.address).toBe('127.0.0.1');
+      const adminUrl = `http://127.0.0.1:${adminAddress.port}`;
+      const statusResponse = await fetch(`${adminUrl}/reauth/status`);
+      expect(statusResponse.status).toBe(200);
+      expect(statusResponse.headers.get('cache-control')).toBe('no-store');
+      expect(await statusResponse.json()).toEqual({ phase: 'idle', lease: null, expiresAt: null, remainingMs: null });
+
+      const startResponse = await fetch(`${adminUrl}/reauth/start`, { method: 'POST' });
+      const started = await startResponse.json() as { phase: string; lease: { id: string; startedAt: string; expiresAt: string; consoleUrl: string; viewerPort: number }; expiresAt: string; remainingMs: number };
+      expect(startResponse.status).toBe(200);
+      expect(started).toMatchObject({
+        phase: 'active',
+        expiresAt: started.lease.expiresAt,
+        remainingMs: expect.any(Number),
+        lease: {
+          id: expect.any(String),
+          startedAt: expect.any(String),
+          expiresAt: expect.any(String),
+          consoleUrl: expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+\/vnc\.html\?/),
+          viewerPort: expect.any(Number)
+        }
+      });
+      const consoleUrl = new URL(started.lease.consoleUrl);
+      expect(consoleUrl.hash).toMatch(/^#password=.+/);
+
+      const stopResponse = await fetch(`${adminUrl}/reauth/stop`, { method: 'POST' });
+      expect(stopResponse.status).toBe(200);
+      expect(await stopResponse.json()).toEqual({ phase: 'idle', lease: null, expiresAt: null, remainingMs: null });
+    } finally {
+      await service.close();
+      await runtime.stopAll();
+      rmSync(profileDir, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(!browserAvailable)('bounds a stalled interactive context close during service shutdown', async () => {
+    await Promise.allSettled(clients.splice(0).map((client) => client.close()));
+    await service.close();
+    const profileDir = mkdtempSync(join(tmpdir(), 'marketplace-service-reauth-stalled-close-'));
+    const browserProfileDir = join(profileDir, 'profile');
+    const logger = { error: vi.fn() };
+    const browser = new BrowserSessionManager({ profileDir: browserProfileDir, settleTimeoutMs: 200, launchTimeoutMs: 5_000, logger });
+    const runtime = new FakeReauthRuntime();
+    await startServiceWith({ name: 'reauth-stalled-close', search: () => [], fetch: () => null }, logger, undefined, browser, {
+      browserProfileDir,
+      reauthRuntime: runtime,
+      reauthAdminPort: 0,
+      reauthViewerPort: 0,
+      reauthTargetUrl
+    });
+    try {
+      const firstLease = await service.reauth.start();
+      const context = service.browser.interactiveContext();
+      expect(context).toBeDefined();
+      const owner = context?.browser();
+      expect(owner).not.toBeNull();
+      if (context) context.close = () => new Promise<void>(() => undefined);
+
+      const startedAt = Date.now();
+      await expectCompletesWithin(service.close(), 3_000);
+      expect(Date.now() - startedAt).toBeLessThan(3_000);
+      expect(service.reauth.status()).toMatchObject({ phase: 'idle', lease: null });
+      expect(service.browser.getInfo()).toMatchObject({ status: 'browser_unavailable', browserStarted: false });
+      expect(service.browser.getInfo().interactive).not.toBe(true);
+      expect(service.browser.interactiveContext()).toBeUndefined();
+      expect(owner?.isConnected()).toBe(false);
+      expect(logger.error).toHaveBeenCalledWith('Interactive browser context did not close within the configured timeout');
+      expect(runtime.children.every((child) => child.exitCode !== null || child.signalCode !== null)).toBe(true);
+
+      await expect(service.reauth.start()).rejects.toThrow('Browser session is closed');
+      expect(service.reauth.status()).toMatchObject({ phase: 'idle', lease: null });
+      expect(firstLease.id).toBeTruthy();
+
+      const nextRuntime = new FakeReauthRuntime();
+      await startServiceWith({ name: 'reauth-after-shutdown', search: () => [], fetch: () => null }, logger, undefined, undefined, {
+        browserProfileDir,
+        reauthRuntime: nextRuntime,
+        reauthAdminPort: 0,
+        reauthViewerPort: 0,
+        reauthTargetUrl
+      });
+      const nextLease = await service.reauth.start();
+      expect(nextLease.id).not.toBe(firstLease.id);
+      expect(service.reauth.status()).toMatchObject({ phase: 'active', lease: { id: nextLease.id } });
+      await service.reauth.stop();
+      expect(service.reauth.status()).toMatchObject({ phase: 'idle', lease: null });
+      await nextRuntime.stopAll();
+    } finally {
+      await service.close();
+      await runtime.stopAll();
+      rmSync(profileDir, { recursive: true, force: true });
+    }
+  }, 10_000);
+
+  it.skipIf(!browserAvailable)('closes an active reauth lease and releases the profile during service shutdown', async () => {
+    await Promise.allSettled(clients.splice(0).map((client) => client.close()));
+    await service.close();
+    const profileDir = mkdtempSync(join(tmpdir(), 'marketplace-service-reauth-close-'));
+    const runtime = new FakeReauthRuntime();
+    await startServiceWith({ name: 'reauth-close', search: () => [], fetch: () => null }, { error: vi.fn() }, undefined, undefined, {
+      browserProfileDir: join(profileDir, 'profile'),
+      reauthRuntime: runtime,
+      reauthAdminPort: 0,
+      reauthViewerPort: 0,
+      reauthTargetUrl
+    });
+    try {
+      await service.reauth.start();
+      const pids = runtime.children.map(({ pid }) => pid);
+      expect(pids.length).toBeGreaterThan(0);
+      const interactiveContext = service.browser.interactiveContext();
+      expect(interactiveContext).toBeDefined();
+      await service.close();
+      expect(service.reauth.status()).toMatchObject({ phase: 'idle', lease: null });
+      expect(service.browser.interactiveContext()).toBeUndefined();
+      expect(service.browser.getInfo()).toMatchObject({
+        status: 'browser_unavailable',
+        browserStarted: false,
+        profileDir: join(profileDir, 'profile')
+      });
+      expect(interactiveContext?.isClosed()).toBe(true);
+      expect(runtime.children.every((child) => child.exitCode !== null || child.signalCode !== null)).toBe(true);
+      expect(pids.every((pid) => pid !== undefined && !isPidAlive(pid))).toBe(true);
+    } finally {
+      await service.close();
+      await runtime.stopAll();
+      rmSync(profileDir, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(!browserAvailable)('keeps the MCP session assessment unknown throughout and after reauth', async () => {
+    await Promise.allSettled(clients.splice(0).map((client) => client.close()));
+    await service.close();
+    const profileDir = mkdtempSync(join(tmpdir(), 'marketplace-service-reauth-status-'));
+    const runtime = new FakeReauthRuntime();
+    await startServiceWith({ name: 'reauth-status', search: () => [], fetch: () => null }, { error: vi.fn() }, undefined, undefined, {
+      browserProfileDir: join(profileDir, 'profile'),
+      reauthRuntime: runtime,
+      reauthAdminPort: 0,
+      reauthViewerPort: 0,
+      reauthTargetUrl
+    });
+    try {
+      const client = await connectClient();
+      await service.reauth.start();
+      const activeStatus = structured(await client.callTool({ name: 'marketplace_status', arguments: {} }));
+      expect(activeStatus.facebook_session.status).toBe('session_unknown');
+      await service.reauth.stop();
+      const stoppedStatus = structured(await client.callTool({ name: 'marketplace_status', arguments: {} }));
+      expect(stoppedStatus.facebook_session.status).toBe('session_unknown');
+    } finally {
+      await service.close();
+      await runtime.stopAll();
+      rmSync(profileDir, { recursive: true, force: true });
+    }
+  });
+
+  it('fails listen and closes both listeners when the admin port is occupied', async () => {
+    await Promise.allSettled(clients.splice(0).map((client) => client.close()));
+    await service.close();
+    const occupied = createHttpServer();
+    await new Promise<void>((resolve, reject) => {
+      occupied.once('error', reject);
+      occupied.listen(0, '127.0.0.1', resolve);
+    });
+    const address = occupied.address();
+    if (!address || typeof address === 'string') throw new Error('Expected occupied TCP address');
+    service = createMarketplaceService({ host: '127.0.0.1', port: 0, adminPort: address.port });
+    try {
+      await expect(packageEntry.listen(service)).rejects.toThrow();
+      expect(service.server.listening).toBe(false);
+      expect(service.admin.address()).toBeNull();
+    } finally {
+      await service.close();
+      await new Promise<void>((resolve, reject) => occupied.close((error) => error ? reject(error) : resolve()));
+    }
+  });
+
   it('supports SDK initialize, list tools, calls, and validates declared schemas', async () => {
     const client = await connectClient();
     expect(client.getServerVersion()).toEqual({ name: 'marketplace', version: '0.1.0' });
@@ -88,13 +301,22 @@ describe('fixture MCP service', () => {
     }
     const searchSchema = tools.tools.find(({ name }) => name === 'marketplace_search')?.inputSchema;
     expect(searchSchema?.required).toEqual(expect.arrayContaining(['query', 'location']));
+    const searchQuerySchema = searchSchema?.properties?.query;
+    expect(searchQuerySchema).toBeDefined();
     const fetchSchema = tools.tools.find(({ name }) => name === 'marketplace_fetch')?.inputSchema;
     expect(fetchSchema?.oneOf).toHaveLength(2);
     expect(fetchSchema?.properties?.url).toMatchObject({ format: 'uri', maxLength: 2048, pattern: expect.any(String) });
-    expect(searchSchema?.properties?.query?.pattern).toBe('\\S');
-    const searchOutputSchema = tools.tools.find(({ name }) => name === 'marketplace_search')?.outputSchema;
-    expect(searchOutputSchema?.anyOf?.[0]?.properties?.ok).toMatchObject({ const: true });
-    expect(searchOutputSchema?.anyOf?.[1]?.properties?.ok).toMatchObject({ const: false });
+    expect(searchQuerySchema).toMatchObject({ pattern: '\\S' });
+    const searchOutputSchema: unknown = tools.tools.find(({ name }) => name === 'marketplace_search')?.outputSchema;
+    const anyOf = isRecord(searchOutputSchema) && Array.isArray(searchOutputSchema.anyOf) ? searchOutputSchema.anyOf : [];
+    const successSchema = anyOf[0];
+    const failureSchema = anyOf[1];
+    const successProperties = isRecord(successSchema) ? successSchema.properties : undefined;
+    const failureProperties = isRecord(failureSchema) ? failureSchema.properties : undefined;
+    expect(successProperties).toBeDefined();
+    expect(failureProperties).toBeDefined();
+    expect(isRecord(successProperties) ? successProperties.ok : undefined).toMatchObject({ const: true });
+    expect(isRecord(failureProperties) ? failureProperties.ok : undefined).toMatchObject({ const: false });
     const serializedSearchOutputSchema = JSON.stringify(searchOutputSchema);
     expect(serializedSearchOutputSchema).toContain('"images"');
     expect(serializedSearchOutputSchema).not.toContain('"image_urls"');
@@ -627,24 +849,61 @@ describe('fixture MCP service', () => {
   });
 });
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+async function expectCompletesWithin<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`Operation did not complete within ${timeoutMs}ms`)), timeoutMs);
+      })
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function isPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function startServiceWith(
   backend: MarketplaceBackend,
   logger: Pick<Console, 'error'>,
   backendTimeoutMs?: number,
-  browser?: BrowserSessionManager
+  browser?: BrowserSessionManager,
+  reauthOptions: {
+    browserProfileDir?: string;
+    reauthRuntime?: FakeReauthRuntime;
+    reauthAdminPort?: number;
+    reauthViewerPort?: number;
+    reauthTargetUrl?: string;
+  } = {}
 ): Promise<void> {
   service = createMarketplaceService({
     host: '127.0.0.1',
     port: 0,
+    adminPort: reauthOptions.reauthAdminPort ?? 0,
     backend,
     logger,
     ...(backendTimeoutMs !== undefined ? { backendTimeoutMs } : {}),
-    ...(browser !== undefined ? { browser } : {})
+    ...(browser !== undefined ? { browser } : {}),
+    ...(reauthOptions.browserProfileDir !== undefined ? { browserProfileDir: reauthOptions.browserProfileDir } : {}),
+    ...(reauthOptions.reauthRuntime !== undefined ? { reauthRuntime: reauthOptions.reauthRuntime } : {}),
+    ...(reauthOptions.reauthAdminPort !== undefined ? { adminPort: reauthOptions.reauthAdminPort } : {}),
+    ...(reauthOptions.reauthViewerPort !== undefined ? { reauthViewerPort: reauthOptions.reauthViewerPort } : {}),
+    ...(reauthOptions.reauthTargetUrl !== undefined ? { reauthTargetUrl: reauthOptions.reauthTargetUrl } : {})
   });
-  await new Promise<void>((resolve, reject) => {
-    service.server.once('error', reject);
-    service.server.listen(0, '127.0.0.1', resolve);
-  });
+  await packageEntry.listen(service);
   const address = service.address();
   if (!address || typeof address === 'string') throw new Error('Expected a TCP address');
   baseUrl = `http://127.0.0.1:${address.port}`;

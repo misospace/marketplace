@@ -20,7 +20,14 @@ export interface BrowserSessionInfo {
   profileDir: string;
   profileExisted: boolean;
   browserStarted: boolean;
+  interactive?: boolean;
   reason?: string;
+}
+
+export interface InteractiveBrowserOptions {
+  display?: string;
+  headless?: boolean;
+  signal?: AbortSignal;
 }
 
 export interface BrowserSessionOptions {
@@ -46,13 +53,21 @@ const providerSessionAssessmentSet = new Set<ProviderSessionAssessment>(PROVIDER
 
 export class BrowserSessionManager {
   readonly profileDir: string;
-  private readonly profileExisted: boolean;
+  private profileExisted: boolean;
   private readonly headless: boolean;
   private readonly launchTimeoutMs: number;
   private readonly settleTimeoutMs: number;
   private readonly launchArgs: string[];
   private readonly logger: Pick<Console, 'error'>;
   private context: BrowserContext | undefined;
+  private interactiveBrowserContext: BrowserContext | undefined;
+  private interactive = false;
+  private interactiveLaunchInvalidated = false;
+  private interactiveBegin: Promise<void> | undefined;
+  private interactiveLaunch: Promise<BrowserContext> | undefined;
+  private interactiveLaunchGeneration = 0;
+  private headlessLaunch: Promise<BrowserContext> | undefined;
+  private headlessLaunchGeneration = 0;
   private lastAssessment: ProviderSessionAssessment = 'session_unknown';
   private lastFailure: string | undefined;
   private closed = false;
@@ -84,6 +99,15 @@ export class BrowserSessionManager {
   }
 
   getInfo(): BrowserSessionInfo {
+    if (this.interactive) {
+      return {
+        status: 'session_unknown',
+        profileDir: this.profileDir,
+        profileExisted: this.profileExisted,
+        browserStarted: this.interactiveBrowserContext !== undefined,
+        interactive: true
+      };
+    }
     if (this.closed) {
       return {
         status: 'browser_unavailable',
@@ -126,8 +150,10 @@ export class BrowserSessionManager {
   }
 
   runExclusive<T>(signal: AbortSignal, task: (page: Page, signal: AbortSignal) => Promise<T>): Promise<T> {
+    if (this.interactive) return Promise.reject(new BrowserUnavailableError('Interactive reauth session owns the browser profile'));
     if (signal.aborted) return Promise.reject(signal.reason ?? new Error('Browser operation aborted'));
     return this.enqueue(async () => {
+      if (this.interactive) throw new BrowserUnavailableError('Interactive reauth session owns the browser profile');
       if (this.closed) throw new BrowserUnavailableError('Browser session is closed');
       if (signal.aborted) throw signal.reason ?? new Error('Browser operation aborted');
       const context = await this.ensureContext(signal);
@@ -169,6 +195,133 @@ export class BrowserSessionManager {
     });
   }
 
+  beginInteractive(): Promise<void> {
+    if (this.closed) return Promise.reject(new BrowserUnavailableError('Browser session is closed'));
+    if (this.interactiveBegin) return this.interactiveBegin;
+    if (this.interactive) return Promise.resolve();
+    this.interactive = true;
+    this.interactiveLaunchInvalidated = false;
+    this.headlessLaunchGeneration += 1;
+    this.lastAssessment = 'session_unknown';
+    this.lastFailure = undefined;
+    const headlessLaunch = this.headlessLaunch;
+    const queuedWork = this.queue;
+    const begin = (async (): Promise<void> => {
+      await queuedWork;
+      if (headlessLaunch) await headlessLaunch.catch(() => undefined);
+      if (this.pendingTeardown) {
+        const teardown = this.pendingTeardown;
+        this.pendingTeardown = undefined;
+        await teardown;
+      }
+      const context = this.context;
+      this.context = undefined;
+      if (context) await this.closePersistentContext(context, 'Headless browser context');
+    })();
+    this.interactiveBegin = begin;
+    void begin.finally(() => {
+      if (this.interactiveBegin === begin) this.interactiveBegin = undefined;
+    }).catch(() => undefined);
+    return begin;
+  }
+
+  async openInteractive(options: InteractiveBrowserOptions = {}): Promise<BrowserContext> {
+    if (!this.interactive || this.closed) {
+      throw new BrowserUnavailableError('Interactive browser ownership is not active');
+    }
+    if (this.interactiveBegin) await this.interactiveBegin;
+    if (!this.interactive || this.closed) {
+      throw new BrowserUnavailableError('Interactive browser ownership is not active');
+    }
+    if (this.interactiveLaunchInvalidated) {
+      throw new BrowserUnavailableError('Interactive browser launch was superseded');
+    }
+    if (this.interactiveBrowserContext) return this.interactiveBrowserContext;
+    const generation = this.interactiveLaunchGeneration;
+    if (this.interactiveLaunch) return this.interactiveLaunch;
+
+    const launch = (async () => {
+      if (options.signal?.aborted) throw options.signal.reason ?? new Error('Browser operation aborted');
+      if (!this.interactive || this.closed || generation !== this.interactiveLaunchGeneration) {
+        throw new BrowserUnavailableError('Interactive browser ownership is no longer active');
+      }
+      mkdirSync(this.profileDir, { recursive: true });
+      this.profileExisted = true;
+      const { chromium } = await this.loadPlaywright();
+      if (options.signal?.aborted) throw options.signal.reason ?? new Error('Browser operation aborted');
+      if (!this.interactive || this.closed || generation !== this.interactiveLaunchGeneration) {
+        throw new BrowserUnavailableError('Interactive browser ownership is no longer active');
+      }
+      const context = await chromium.launchPersistentContext(this.profileDir, {
+        headless: options.headless ?? false,
+        handleSIGINT: false,
+        handleSIGTERM: false,
+        handleSIGHUP: false,
+        timeout: this.launchTimeoutMs,
+        args: [
+          ...this.launchArgs,
+          '--disable-background-networking',
+          '--disable-component-update',
+          '--disable-sync',
+          '--disable-default-apps',
+          '--no-first-run',
+          '--no-default-browser-check'
+        ],
+        env: interactiveBrowserEnvironment(options.display)
+      });
+      if (!this.interactive || this.closed || generation !== this.interactiveLaunchGeneration || options.signal?.aborted) {
+        await this.closePersistentContext(context, 'Superseded interactive browser context');
+        if (options.signal?.aborted) throw options.signal.reason ?? new Error('Browser operation aborted');
+        throw new BrowserUnavailableError('Interactive browser ownership is no longer active');
+      }
+      this.interactiveBrowserContext = context;
+      context.once('close', () => {
+        if (this.interactiveBrowserContext === context) this.interactiveBrowserContext = undefined;
+      });
+      return context;
+    })();
+    this.interactiveLaunch = launch;
+    try {
+      return await launch;
+    } catch (error) {
+      if (error instanceof BrowserUnavailableError) throw error;
+      const reason = safeErrorMessage(error);
+      this.logger.error('Interactive browser launch failed during reauth startup');
+      throw new BrowserUnavailableError(reason);
+    } finally {
+      if (this.interactiveLaunch === launch) this.interactiveLaunch = undefined;
+    }
+  }
+
+  interactiveContext(): BrowserContext | undefined {
+    return this.interactiveBrowserContext;
+  }
+
+  // Pair this with endInteractive(); invalidation resets only on the next beginInteractive().
+  async closeInteractive(): Promise<void> {
+    this.interactiveLaunchGeneration += 1;
+    this.interactiveLaunchInvalidated = true;
+    const pendingLaunch = this.interactiveLaunch;
+    if (this.interactiveLaunch === pendingLaunch) this.interactiveLaunch = undefined;
+    const pendingBegin = this.interactiveBegin;
+    if (pendingBegin) await this.settleIgnoring(pendingBegin.catch(() => undefined));
+    if (pendingLaunch) await this.settleIgnoring(pendingLaunch.catch(() => undefined), this.launchTimeoutMs);
+    const context = this.interactiveBrowserContext;
+    if (context) {
+      try {
+        await this.closePersistentContext(context, 'Interactive browser context');
+      } finally {
+        if (this.interactiveBrowserContext === context) this.interactiveBrowserContext = undefined;
+      }
+    }
+  }
+
+  endInteractive(): void {
+    this.interactive = false;
+    this.lastAssessment = 'session_unknown';
+    this.lastFailure = undefined;
+  }
+
   close(): Promise<void> {
     if (this.closePromise) return this.closePromise;
     this.closed = true;
@@ -180,19 +333,28 @@ export class BrowserSessionManager {
       }
       const context = this.context;
       this.context = undefined;
-      if (!context) return;
-      await this.settleIgnoring(context.close().catch(() => undefined));
+      try {
+        if (context) await this.closePersistentContext(context, 'Headless browser context');
+        await this.closeInteractive();
+      } finally {
+        this.interactiveBrowserContext = undefined;
+        this.interactive = false;
+        this.lastAssessment = 'session_unknown';
+      }
     })();
     return this.closePromise;
   }
 
-  private async settle<T>(promise: Promise<T>): Promise<{ settled: true; value: T } | { settled: false }> {
+  private async settle<T>(
+    promise: Promise<T>,
+    timeoutMs = this.settleTimeoutMs
+  ): Promise<{ settled: true; value: T } | { settled: false }> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       return await Promise.race([
         promise.then((value) => ({ settled: true as const, value })),
         new Promise<{ settled: false }>((resolve) => {
-          timer = setTimeout(() => resolve({ settled: false }), this.settleTimeoutMs);
+          timer = setTimeout(() => resolve({ settled: false }), timeoutMs);
         })
       ]);
     } finally {
@@ -200,8 +362,50 @@ export class BrowserSessionManager {
     }
   }
 
-  private async settleIgnoring(promise: Promise<unknown>): Promise<void> {
-    await this.settle(promise);
+  private async settleIgnoring(promise: Promise<unknown>, timeoutMs = this.settleTimeoutMs): Promise<void> {
+    await this.settle(promise, timeoutMs);
+  }
+
+  private async closePersistentContext(context: BrowserContext, label: string): Promise<void> {
+    let closeSettled = false;
+    let closeFailed = false;
+    const close = Promise.resolve().then(() => context.close()).then(
+      () => { closeSettled = true; },
+      () => { closeSettled = true; closeFailed = true; }
+    );
+    await this.settleIgnoring(close, this.settleTimeoutMs);
+    if (closeSettled && !closeFailed) return;
+
+    this.logCloseFailure(closeFailed ? `${label} failed to close` : `${label} did not close within the configured timeout`);
+    // The close is diagnostic only; do not poison the reusable session assessment.
+    let browser: ReturnType<BrowserContext['browser']>;
+    try {
+      browser = context.browser();
+    } catch {
+      this.logCloseFailure('Could not access the persistent browser for forced shutdown');
+      return;
+    }
+    if (!browser) return;
+
+    let browserCloseSettled = false;
+    let browserCloseFailed = false;
+    const browserClose = Promise.resolve().then(() => browser.close()).then(
+      () => { browserCloseSettled = true; },
+      () => { browserCloseSettled = true; browserCloseFailed = true; }
+    );
+    const forceCloseTimeoutMs = Math.min(this.settleTimeoutMs, 1_000);
+    await this.settleIgnoring(browserClose, forceCloseTimeoutMs);
+    if (!browserCloseSettled || browserCloseFailed) {
+      this.logCloseFailure('Persistent browser did not close within the configured timeout');
+    }
+  }
+
+  private logCloseFailure(message: string): void {
+    try {
+      this.logger.error(message);
+    } catch {
+      // Cleanup must continue even if a custom logger fails.
+    }
   }
 
   private discardContext(reason: string): void {
@@ -219,43 +423,65 @@ export class BrowserSessionManager {
     return result;
   }
 
+  protected loadPlaywright(): Promise<typeof import('playwright')> {
+    return import('playwright');
+  }
+
   private async ensureContext(signal: AbortSignal): Promise<BrowserContext> {
     if (this.closed) throw new BrowserUnavailableError('Browser session is closed');
     if (this.pendingTeardown) {
       const teardown = this.pendingTeardown;
       this.pendingTeardown = undefined;
       await teardown;
+      if (this.interactive) throw new BrowserUnavailableError('Interactive reauth session owns the browser profile');
+      if (this.closed) throw new BrowserUnavailableError('Browser session is closed');
     }
     if (this.context) return this.context;
     if (signal.aborted) throw signal.reason ?? new Error('Browser operation aborted');
 
     try {
-      mkdirSync(this.profileDir, { recursive: true });
-      const { chromium } = await import('playwright');
-      if (signal.aborted) throw signal.reason ?? new Error('Browser operation aborted');
-      // Playwright exposes no signal for launch, so an in-flight launch is only
-      // bounded by launchTimeoutMs; the abort signal is re-checked after it.
-      const context = await chromium.launchPersistentContext(this.profileDir, {
-        headless: this.headless,
-        timeout: this.launchTimeoutMs,
-        ...(this.launchArgs.length ? { args: this.launchArgs } : {})
-      });
-      if (this.closed) {
-        await context.close().catch(() => undefined);
-        throw new BrowserUnavailableError('Browser session is closed');
-      }
-      this.context = context;
-      context.once('close', () => {
-        if (this.context === context) {
-          this.context = undefined;
-          this.lastAssessment = 'session_unknown';
-          if (!this.closed) this.lastFailure = 'Browser session closed unexpectedly';
+      const generation = this.headlessLaunchGeneration;
+      const launch = (async (): Promise<BrowserContext> => {
+        mkdirSync(this.profileDir, { recursive: true });
+        this.profileExisted = true;
+        const { chromium } = await this.loadPlaywright();
+        if (this.interactive || generation !== this.headlessLaunchGeneration) {
+          throw new BrowserUnavailableError('Interactive reauth session owns the browser profile');
         }
-      });
-      this.lastFailure = undefined;
-      return context;
+        if (signal.aborted) throw signal.reason ?? new Error('Browser operation aborted');
+        // Playwright exposes no signal for launch, so an in-flight launch is only
+        // bounded by launchTimeoutMs; the abort signal is re-checked after it.
+        const context = await chromium.launchPersistentContext(this.profileDir, {
+          headless: this.headless,
+          timeout: this.launchTimeoutMs,
+          ...(this.launchArgs.length ? { args: this.launchArgs } : {})
+        });
+        if (this.closed || this.interactive || generation !== this.headlessLaunchGeneration) {
+          await this.closePersistentContext(context, 'Superseded headless browser context');
+          if (this.interactive || generation !== this.headlessLaunchGeneration) {
+            throw new BrowserUnavailableError('Interactive reauth session owns the browser profile');
+          }
+          throw new BrowserUnavailableError('Browser session is closed');
+        }
+        this.context = context;
+        context.once('close', () => {
+          if (this.context === context) {
+            this.context = undefined;
+            this.lastAssessment = 'session_unknown';
+            if (!this.closed) this.lastFailure = 'Browser session closed unexpectedly';
+          }
+        });
+        this.lastFailure = undefined;
+        return context;
+      })();
+      this.headlessLaunch = launch;
+      try {
+        return await launch;
+      } finally {
+        if (this.headlessLaunch === launch) this.headlessLaunch = undefined;
+      }
     } catch (error) {
-      if (error instanceof BrowserUnavailableError && this.closed) throw error;
+      if (error instanceof BrowserUnavailableError && (this.closed || this.interactive)) throw error;
       if (signal.aborted && error === signal.reason) throw error;
       const reason = safeErrorMessage(error);
       this.lastFailure = reason;
@@ -263,6 +489,19 @@ export class BrowserSessionManager {
       throw new BrowserUnavailableError(reason);
     }
   }
+}
+
+function interactiveBrowserEnvironment(display: string | undefined): NodeJS.ProcessEnv {
+  const environment: NodeJS.ProcessEnv = {};
+  for (const key of [
+    'PATH', 'HOME', 'LANG', 'PLAYWRIGHT_BROWSERS_PATH',
+    'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy'
+  ] as const) {
+    const value = process.env[key];
+    if (value !== undefined) environment[key] = value;
+  }
+  if (display !== undefined) environment.DISPLAY = display;
+  return environment;
 }
 
 function resolveProfileDir(configured: string | undefined): string {

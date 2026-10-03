@@ -69,3 +69,8 @@ jobs:
         run: >-
           docker run --rm --entrypoint node marketplace:ci --input-type=module -e
           "import('playwright').then(async ({chromium})=>{const c=await chromium.launchPersistentContext('/tmp/marketplace-profile',{headless:true});const p=await c.newPage();await p.setContent('<h1>ok</h1>');console.log('chromium-ok');await c.close();}).catch((e)=>{console.error(e);process.exit(1)})"
+      - name: Smoke-test re-auth console stack
+        run: |
+          output=$(docker run --rm --network none -v "$PWD/scripts:/smoke:ro" --entrypoint node marketplace:ci /smoke/reauth-smoke.mjs)
+          printf '%s\n' "$output"
+          grep -Fq 'SMOKE_RESULT {"orphans":[],"tempDirectories":[]}' <<<"$output"

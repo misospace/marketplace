@@ -206,26 +206,27 @@ function getPathname(value: string): string | undefined {
   }
 }
 
-function normalizeFacebookBaseUrl(value: string): string {
-  if (typeof value !== 'string') {
-    throw new TypeError('baseUrl must be an HTTP(S) origin URL');
-  }
-
+export function assertFacebookOrigin(value: string): string {
+  if (typeof value !== 'string') throw new TypeError('URL must be a valid HTTP(S) URL');
   let url: URL;
   try {
     url = new URL(value);
   } catch {
-    throw new TypeError('baseUrl must be a valid HTTP(S) origin URL');
+    throw new TypeError('URL must be a valid HTTP(S) URL');
   }
-
   if ((url.protocol !== 'http:' && url.protocol !== 'https:') || url.username || url.password ||
-      url.pathname !== '/' || url.search || url.hash || value.includes('?') || value.includes('#')) {
+      (url.origin !== FACEBOOK_ORIGIN && !isLoopbackHost(url.hostname))) {
+    throw new TypeError('URL must use the Facebook origin or a loopback origin');
+  }
+  return value;
+}
+
+function normalizeFacebookBaseUrl(value: string): string {
+  assertFacebookOrigin(value);
+  const url = new URL(value);
+  if (url.pathname !== '/' || url.search || url.hash || value.includes('?') || value.includes('#')) {
     throw new TypeError('baseUrl must be an HTTP(S) origin without credentials, path, query, or fragment');
   }
-  if (url.origin !== FACEBOOK_ORIGIN && !isLoopbackHost(url.hostname)) {
-    throw new TypeError('baseUrl must be the Facebook origin or a loopback test origin');
-  }
-
   return url.origin;
 }
 
