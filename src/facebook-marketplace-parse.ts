@@ -47,6 +47,7 @@ export const CURRENCY_SYMBOLS: Readonly<Record<string, string>> = {
 };
 
 const ISO_CURRENCIES = ['USD', 'CAD', 'AUD', 'GBP', 'EUR', 'JPY', 'INR', 'MXN', 'BRL', 'CHF', 'NZD', 'HKD', 'SGD', 'KRW', 'SEK', 'NOK', 'DKK', 'PLN', 'TRY', 'ZAR'] as const;
+export const COMMA_DECIMAL_CURRENCIES: ReadonlySet<string> = new Set(['EUR', 'TRY', 'BRL', 'SEK', 'NOK', 'DKK', 'PLN']);
 const DOLLAR_CURRENCIES = new Set(['USD', 'CAD', 'AUD', 'NZD', 'HKD', 'SGD', 'MXN', 'BRL']);
 const SORTED_SYMBOLS = Object.keys(CURRENCY_SYMBOLS).sort((a, b) => b.length - a.length);
 const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -57,7 +58,7 @@ const SYMBOL_PATTERN = SORTED_SYMBOLS.map((symbol) => {
 const CURRENCY_SYMBOL_PATTERN = `(?:${SYMBOL_PATTERN.join('|')})`;
 // Exact three-digit whitespace groups are treated as thousands separators; this favors common prices over separate adjacent numbers.
 const NUMBER_TOKEN_PATTERN = '[+\\-]?(?:\\d{1,3}(?:[\\s\\u00a0]\\d{3})+|\\d)(?:[\\d.,]*\\d)?';
-const NUMBER_AFTER_PATTERN = new RegExp(`^\\s*(${NUMBER_TOKEN_PATTERN})(?![\\s\\u00a0]*\\d)(?:[.,](?!\\d))?`);
+const NUMBER_AFTER_PATTERN = new RegExp(`^\\s*(${NUMBER_TOKEN_PATTERN})(?![\\s\\u00a0]*\\d)(?!\\p{L})(?![.,]\\d)(?:[.,](?!\\d))?`, 'u');
 const NUMBER_BEFORE_PATTERN = new RegExp(`(?:^|[^\\d\\s\\u00a0])\\s*(${NUMBER_TOKEN_PATTERN})\\s*$`);
 const MARKER_PATTERN = new RegExp(
   `(?:${CURRENCY_SYMBOL_PATTERN}|\\b(?:${ISO_CURRENCIES.join('|')})\\b)`,
@@ -68,7 +69,7 @@ function makePriceResult(status: MarketplacePriceParse['status'], price: number 
   return { status, price, currency };
 }
 
-function parseNumberToken(token: string): number | null {
+function parseNumberToken(token: string, currency: string): number | null {
   if (!/^[+\-]?\d(?:[\d.,]|[\s\u00a0]\d{3})*$/.test(token) || token.startsWith('-')) return null;
   let normalized = token.replace(/^\+/, '').replace(/[\s\u00a0]/g, '');
   const comma = normalized.lastIndexOf(',');
@@ -86,7 +87,12 @@ function parseNumberToken(token: string): number | null {
     const separator = comma !== -1 ? ',' : '.';
     const parts = normalized.split(separator);
     if (parts.some((part) => !/^\d+$/.test(part))) return null;
-    if (parts.length === 2 && parts[1]?.length !== 3) {
+    if (parts.length === 2 && parts[1]?.length === 3) {
+      const isDecimalSeparator = separator === ',' ? COMMA_DECIMAL_CURRENCIES.has(currency) : !COMMA_DECIMAL_CURRENCIES.has(currency);
+      if (isDecimalSeparator) return null;
+      if (!validGroupedInteger(normalized, separator)) return null;
+      normalized = normalized.split(separator).join('');
+    } else if (parts.length === 2) {
       normalized = `${parts[0]}.${parts[1]}`;
     } else {
       if (!validGroupedInteger(normalized, separator)) return null;
@@ -154,11 +160,12 @@ export function parseMarketplacePrice(text: string, marketCurrency: string): Mar
 
       const hasAdjacentNumber = Boolean(/[+\-]?\d\s*$/.test(before)
         || /^\s*[+\-]?\s*\d/.test(after)
-        || numberToken);
+        || numberToken
+        || /^\s*\d[\d.,]*\d\p{L}/u.test(after));
       if (!hasAdjacentNumber) continue;
 
       const signPrefixed = /-\s*$/.test(before) || /^\s*-\s*\d/.test(after);
-      const price = numberToken && !signPrefixed ? parseNumberToken(numberToken) : null;
+      const price = numberToken && !signPrefixed ? parseNumberToken(numberToken, currency) : null;
       if (price !== null) return makePriceResult('ok', price, currency);
       malformedCurrency ??= currency;
     }
@@ -276,6 +283,7 @@ export function parseMarketplacePage(input: ParseMarketplaceInput): MarketplaceP
     }
 
     const heading = card.headingText?.trim() ?? '';
+    // Prose-like headings can still be real titles; discard only exact known noise labels.
     let sourceTitle = heading && !isNoiseLine(heading) ? heading : '';
     if (!sourceTitle) {
       sourceTitle = lines.find((line) => !isPriceLine(line, input.market.currency)
@@ -402,12 +410,11 @@ export function interpretMarketplacePage(input: ParseMarketplaceInput): Marketpl
   if (kind === 'no_results') return { kind: 'empty', stats: emptyStats(input.page.cards.length) };
 
   const result = parseMarketplacePage(input);
-  const recognizedSkips = (result.stats.skipReasons.sponsored ?? 0)
+  const parseFailureSkips = (result.stats.skipReasons.missing_item_id ?? 0)
+    + (result.stats.skipReasons.missing_title ?? 0)
     + (result.stats.skipReasons.malformed_price ?? 0)
-    + (result.stats.skipReasons.invalid_listing ?? 0)
-    + result.stats.duplicates;
-  const noUnrecognizedCards = result.stats.structurallyValid + recognizedSkips === result.stats.cardsSeen;
-  if (result.stats.cardsSeen > 0 && result.stats.structurallyValid === 0 && !noUnrecognizedCards) {
+    + (result.stats.skipReasons.invalid_listing ?? 0);
+  if (result.listings.length === 0 && parseFailureSkips > 0) {
     return { kind: 'error', code: 'UPSTREAM_ERROR', message: 'The Facebook Marketplace results were present but could not be parsed.' };
   }
   if (result.listings.length > 0) return { kind: 'listings', ...result };

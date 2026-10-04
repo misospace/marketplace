@@ -3,7 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { chromium, type Browser, type Page } from 'playwright';
 import { MARKETPLACE_ITEM_PATH } from '../src/facebook-marketplace-url.js';
 import { extractMarketplacePage, MARKETPLACE_EXTRACT_LIMITS } from '../src/facebook-marketplace-extract.js';
-import { classifyMarketplacePage, interpretMarketplacePage, parseMarketplacePrice } from '../src/facebook-marketplace-parse.js';
+import { classifyMarketplacePage, interpretMarketplacePage, parseMarketplacePage, parseMarketplacePrice } from '../src/facebook-marketplace-parse.js';
 
 const browserAvailable = existsSync(chromium.executablePath());
 if (!browserAvailable && process.env.REQUIRE_BROWSER_TESTS === '1') {
@@ -83,6 +83,15 @@ describe.skipIf(!browserAvailable)('Facebook Marketplace page extraction', () =>
       expect(outcome).toMatchObject({ kind: 'error', code: testCase.outcome });
     }
 
+    if (testCase.file === 'results-all-malformed.html') {
+      const parsed = parseMarketplacePage({
+        page: extracted,
+        baseUrl: 'https://www.facebook.com/',
+        market: { slug: 'nyc', label: 'New York, NY', currency: 'USD' },
+        limit: 20
+      });
+      expect(parsed.stats.skipReasons).toMatchObject({ malformed_price: 2, missing_title: 1 });
+    }
     if (testCase.file === 'results-normal.html') {
       expect(extracted.cards.map((card) => card.itemHref)).toHaveLength(3);
       expect(outcome.kind === 'listings' ? outcome.listings.map(({ id }) => id) : []).toEqual([
@@ -166,6 +175,17 @@ describe.skipIf(!browserAvailable)('Facebook Marketplace page extraction', () =>
       market: { slug: 'nyc', label: 'New York, NY', currency: 'USD' },
       limit: 5
     }).kind).toBe('listings');
+  });
+
+  it('keeps a rate-limit banner visible beside cards inside the shared grid', async () => {
+    await page.setContent(`<!doctype html><html><body><main><div class="grid"><p>You are temporarily blocked. Please try again later.</p><div class="card"><a href="/marketplace/item/123456789012345/">Listing</a><h3>Everyday chair</h3><div>$25</div></div><div class="card"><a href="/marketplace/item/123456789012346/">Listing</a><h3>Wooden table</h3><div>$40</div></div></div></main></body></html>`, { waitUntil: 'domcontentloaded' });
+    const extracted = await page.evaluate(extractMarketplacePage, {
+      itemPath: MARKETPLACE_ITEM_PATH,
+      limits: MARKETPLACE_EXTRACT_LIMITS
+    });
+    expect(extracted.cards).toHaveLength(2);
+    expect(extracted.signals.hasRateLimitNotice).toBe(true);
+    expect(classifyMarketplacePage(extracted)).toBe('rate_limited');
   });
 
   it('keeps a real rate-limit banner visible when the page has one item link', async () => {

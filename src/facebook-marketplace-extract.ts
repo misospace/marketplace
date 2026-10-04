@@ -67,58 +67,48 @@ export function extractMarketplacePage(options: ExtractMarketplaceOptions): Extr
     const match = pathname.match(itemIdPattern);
     return match?.[1] ?? null;
   };
-  const subtreeItemIds = (root: Element): string[] => {
+  const itemIdCounts = new WeakMap<Element, number>();
+  const distinctItemIds = (element: Element): number => {
+    const cached = itemIdCounts.get(element);
+    if (cached !== undefined) return cached;
+
     const ids = new Set<string>();
-    if (root.matches('a[href]')) {
-      const ownId = itemIdFromHref((root as HTMLAnchorElement).href);
+    if (element.matches('a[href]')) {
+      const ownId = itemIdFromHref((element as HTMLAnchorElement).href);
       if (ownId) ids.add(ownId);
     }
-    for (const anchor of root.querySelectorAll('a[href]')) {
+    for (const anchor of element.querySelectorAll('a[href]')) {
       const id = itemIdFromHref((anchor as HTMLAnchorElement).href);
-      if (id) {
-        ids.add(id);
-        if (ids.size > 1) break;
-      }
+      if (id) ids.add(id);
     }
-    return [...ids];
+    itemIdCounts.set(element, ids.size);
+    return ids.size;
   };
 
-  // Card policy: find item anchors, walk upward to the highest bounded ancestor containing exactly one distinct item id, then deduplicate roots in document order.
+  // Card policy: take the highest bounded ancestor containing one distinct item id, then deduplicate roots in document order.
   const cardRoots: Element[] = [];
   const seenRoots = new Set<Element>();
   const anchors = document.querySelectorAll('a[href]');
-  let candidateAnchorsVisited = 0;
-  for (let anchorIndex = 0; anchorIndex < anchors.length
-    && cardRoots.length < maxCards
-    && candidateAnchorsVisited < maxCards; anchorIndex += 1) {
-    const anchor = anchors[anchorIndex];
-    if (!anchor || !itemIdFromHref((anchor as HTMLAnchorElement).href)) continue;
-    let knownCardAncestor: Element | null = anchor.parentElement;
-    let belongsToKnownCard = false;
-    while (knownCardAncestor) {
-      if (seenRoots.has(knownCardAncestor)) {
-        belongsToKnownCard = true;
-        break;
-      }
-      if (knownCardAncestor.matches('main, body, html')) break;
-      knownCardAncestor = knownCardAncestor.parentElement;
-    }
-    if (belongsToKnownCard) continue;
-    candidateAnchorsVisited += 1;
+  for (const anchor of anchors) {
+    if (!itemIdFromHref((anchor as HTMLAnchorElement).href)) continue;
     let current: Element | null = anchor;
     let selected: Element = anchor;
+    let belongsToKnownRoot = false;
     for (let level = 0; level < maxAncestorLevels && current; level += 1) {
+      if (seenRoots.has(current)) {
+        belongsToKnownRoot = true;
+        break;
+      }
       if (current.matches('main, body, html')) break;
-      if (subtreeItemIds(current).length === 1) selected = current;
+      if (distinctItemIds(current) === 1) selected = current;
       current = current.parentElement;
     }
-    if (!seenRoots.has(selected)) {
-      seenRoots.add(selected);
-      cardRoots.push(selected);
-    }
+    if (belongsToKnownRoot || seenRoots.has(selected)) continue;
+    seenRoots.add(selected);
+    cardRoots.push(selected);
   }
 
-  const cards: ExtractedListingCard[] = cardRoots.map((root) => {
+  const cards: ExtractedListingCard[] = cardRoots.slice(0, maxCards).map((root) => {
     const anchors: HTMLAnchorElement[] = [];
     if (root.matches('a[href]')) anchors.push(root as HTMLAnchorElement);
     anchors.push(...Array.from(root.querySelectorAll('a[href]')) as HTMLAnchorElement[]);
@@ -184,15 +174,6 @@ export function extractMarketplacePage(options: ExtractMarketplaceOptions): Extr
   });
 
   const cardRootSet = new Set(cardRoots);
-  const allCardAncestorSet = new Set<Element>();
-  for (const anchor of document.querySelectorAll('a[href]')) {
-    if (!itemIdFromHref((anchor as HTMLAnchorElement).href)) continue;
-    let ancestor: Element | null = anchor;
-    while (ancestor && !ancestor.matches('main, body, html')) {
-      allCardAncestorSet.add(ancestor);
-      ancestor = ancestor.parentElement;
-    }
-  }
   // If the results grid is itself main/body/html, only that boundary can contain each item link, so card prose remains in signal text.
   const pageTextParts: string[] = [];
   const textWalker = document.createTreeWalker(document.body ?? document.documentElement, 4);
@@ -201,7 +182,7 @@ export function extractMarketplacePage(options: ExtractMarketplaceOptions): Extr
     let ancestor = textNode.parentElement;
     let insideCard = false;
     while (ancestor) {
-      if (cardRootSet.has(ancestor) || allCardAncestorSet.has(ancestor)) {
+      if (cardRootSet.has(ancestor)) {
         insideCard = true;
         break;
       }

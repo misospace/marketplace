@@ -73,8 +73,16 @@ describe('Marketplace price parsing', () => {
     expect(parseMarketplacePrice(text, currency)).toEqual({ status: 'ok', price, currency: expectedCurrency });
   });
 
-  it.each(['$1,2,3', '-$100'])('marks malformed token %s', (text) => {
+  it.each(['$1,2,3', '-$100', '$1k', '$1e3', '$1.5k', '$1x', '$12.345', '$1.500', '1,500 €'])('marks malformed token %s', (text) => {
     expect(parseMarketplacePrice(text, 'USD').status).toBe('malformed');
+  });
+
+  it.each([
+    ['$1,500', 'USD', 1500, 'USD'],
+    ['1.500 €', 'USD', 1500, 'EUR'],
+    ['$1,234.56', 'USD', 1234.56, 'USD']
+  ])('parses locale-aware grouped amount %s', (text, marketCurrency, price, currency) => {
+    expect(parseMarketplacePrice(text, marketCurrency)).toEqual({ status: 'ok', price, currency });
   });
 
   it.each(['$abc', '$', 'USD', '3 krabs', 'tikkr'])('treats non-adjacent currency prose %s as absent', (text) => {
@@ -255,9 +263,25 @@ describe('Marketplace outcomes', () => {
     expect(interpretMarketplacePage(input(sponsored))).toMatchObject({ kind: 'empty' });
   });
 
-  it('does not call cards with valid ids and titles an unknown layout', () => {
-    const malformed = [card({ text: 'Bike\n$1,2,3', headingText: 'Bike' })];
-    expect(interpretMarketplacePage(input(malformed))).toMatchObject({ kind: 'empty' });
+  it('returns upstream error when valid cards all have malformed prices', () => {
+    const malformed = [
+      card({ text: 'Bike\n$1,2,3', headingText: 'Bike' }),
+      card({ itemHref: '/marketplace/item/1234567891/', text: 'Chair\n$2,3,4', headingText: 'Chair' })
+    ];
+    expect(interpretMarketplacePage(input(malformed))).toMatchObject({ kind: 'error', code: 'UPSTREAM_ERROR' });
+  });
+
+  it('keeps a heading that reads like prose as a deliberate title ambiguity', () => {
+    const result = parseMarketplacePage(input([card({ headingText: 'Sold as-is', text: 'Sold as-is\n$20' })]));
+    expect(result.listings[0]?.title).toBe('Sold as-is');
+  });
+
+  it('returns empty when all listings are excluded by price filters', () => {
+    const result = interpretMarketplacePage(input([
+      card({ text: 'Bike\n$20', headingText: 'Bike' }),
+      card({ itemHref: '/marketplace/item/1234567891/', text: 'Chair\n$30', headingText: 'Chair' })
+    ], { minPrice: 40 }));
+    expect(result).toMatchObject({ kind: 'empty' });
   });
 
   it('returns empty for no results and does not treat unknown as empty success', () => {
