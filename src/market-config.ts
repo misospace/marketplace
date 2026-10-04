@@ -1,37 +1,91 @@
 import { readFileSync } from 'node:fs';
 import { z } from 'zod';
-import { normalizeLocationKey, type FacebookMarket } from './facebook-marketplace-url.js';
+import { validateFacebookMarkets, validateMarket, type FacebookMarket } from './facebook-marketplace-url.js';
 
-const nonBlank = z.string().trim().min(1).max(200);
+/** Bounds a mounted ConfigMap; the built-in map is ten entries. */
+const MAX_MARKETS_FILE_BYTES = 64 * 1024;
+
+// Structure only. The slug, currency, label and alias rules deliberately stay in
+// validateMarket / validateFacebookMarkets, so a configured file cannot drift from the rules
+// the built-in map is held to.
 const marketsSchema = z.array(z.object({
-  slug: z.string().regex(/^[a-z0-9][a-z0-9-]*$/).max(100),
-  label: nonBlank,
-  currency: z.string().regex(/^[A-Z]{3}$/),
-  aliases: z.array(nonBlank).max(50).optional()
-}).strict()).min(1).max(100);
+  slug: z.string(),
+  label: z.string(),
+  currency: z.string(),
+  aliases: z.array(z.string()).optional()
+}).strict()).min(1);
 
-/** An explicit file replaces the defaults; invalid configuration fails startup. */
-export function loadFacebookMarkets(path: string | undefined): readonly FacebookMarket[] | undefined {
-  if (path === undefined) return undefined;
-  try {
-    if (!path.trim()) throw new Error();
-    const data = readFileSync(path);
-    if (data.length > 64 * 1024) throw new Error();
-    const markets = marketsSchema.parse(JSON.parse(data.toString('utf8')));
-    const slugs = new Set<string>();
-    const keys = new Map<string, string>();
-    for (const market of markets) {
-      if (slugs.has(market.slug)) throw new Error();
-      slugs.add(market.slug);
-      for (const value of [market.slug, market.label, ...(market.aliases ?? [])]) {
-        const key = normalizeLocationKey(value);
-        if (!key || (keys.has(key) && keys.get(key) !== market.slug)) throw new Error();
-        keys.set(key, market.slug);
-      }
-    }
-    return markets;
-  } catch {
-    // Do not include file contents or parser diagnostics in startup logs.
-    throw new Error('MARKETPLACE_MARKETS_FILE must contain a readable, valid market map');
+/**
+ * Resolves the configured market-map path. `FACEBOOK_MARKETS_FILE` is the documented name;
+ * `MARKETPLACE_MARKETS_FILE` is the name this first shipped under and stays as a fallback so an
+ * existing deployment keeps working. A blank value counts as unset.
+ */
+export function facebookMarketsFilePath(env: Record<string, string | undefined> = process.env): string | undefined {
+  for (const value of [env.FACEBOOK_MARKETS_FILE, env.MARKETPLACE_MARKETS_FILE]) {
+    if (value !== undefined && value.trim()) return value.trim();
   }
+  return undefined;
+}
+
+/**
+ * Loads a replacement market map from a JSON file of `FacebookMarket` entries. An explicit file
+ * replaces the built-in defaults; an unset or blank path leaves them in place. Invalid
+ * configuration fails startup with an error naming the file and the offending entry, without
+ * echoing file contents.
+ */
+export function loadFacebookMarkets(path: string | undefined): readonly FacebookMarket[] | undefined {
+  if (path === undefined || !path.trim()) return undefined;
+  const source = `the Facebook markets file at ${path}`;
+
+  let contents: Buffer;
+  try {
+    contents = readFileSync(path);
+  } catch (error) {
+    throw new Error(`Could not read ${source}: ${describe(error)}`);
+  }
+  if (contents.byteLength > MAX_MARKETS_FILE_BYTES) {
+    throw new RangeError(`${source} is larger than the ${MAX_MARKETS_FILE_BYTES} byte limit`);
+  }
+
+  let value: unknown;
+  try {
+    value = JSON.parse(stripByteOrderMark(contents.toString('utf8')));
+  } catch (error) {
+    throw new TypeError(`${source} is not valid JSON: ${describe(error)}`);
+  }
+
+  const parsed = marketsSchema.safeParse(value);
+  if (!parsed.success) {
+    throw new TypeError(`${source} is not a valid market map: ${formatIssue(parsed.error)}`);
+  }
+
+  parsed.data.forEach((market, index) => {
+    try {
+      validateMarket(market);
+    } catch (error) {
+      throw new TypeError(`${source} has an invalid market at index ${index}: ${describe(error)}`);
+    }
+  });
+  try {
+    validateFacebookMarkets(parsed.data);
+  } catch (error) {
+    throw new TypeError(`${source} is not a valid market map: ${describe(error)}`);
+  }
+
+  return parsed.data;
+}
+
+function stripByteOrderMark(text: string): string {
+  return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+}
+
+function describe(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function formatIssue(error: z.ZodError): string {
+  const issue = error.issues[0];
+  if (!issue) return 'invalid document';
+  const path = issue.path.length > 0 ? `${issue.path.join('.')}: ` : '';
+  return `${path}${issue.message}`;
 }
