@@ -1,3 +1,4 @@
+import { loadFacebookMarkets } from './market-config.js';
 import { createMarketplaceService, installShutdownHandlers, listen } from './service.js';
 
 export { FixtureBackend, ProviderError, type MarketplaceBackend } from './backend.js';
@@ -79,7 +80,8 @@ export * from './domain.js';
 const isMain = process.argv[1] !== undefined && import.meta.url === new URL(`file://${process.argv[1]}`).href;
 
 if (isMain) {
-  const service = createMarketplaceService();
+  const facebookMarkets = loadFacebookMarkets(process.env.MARKETPLACE_MARKETS_FILE);
+  const service = createMarketplaceService({ ...(facebookMarkets !== undefined ? { facebookMarkets } : {}) });
   await listen(service);
   installShutdownHandlers(service);
 }
