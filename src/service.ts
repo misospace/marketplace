@@ -3,6 +3,8 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import type { MarketplaceBackend } from './backend.js';
 import { FixtureBackend } from './backend.js';
+import { FacebookMarketplaceBackend } from './facebook-marketplace-backend.js';
+import type { FacebookMarket } from './facebook-marketplace-url.js';
 import { backendNameSchema, SERVICE_VERSION } from './domain.js';
 import { BrowserSessionManager } from './browser.js';
 import { FacebookSessionProbe, toProviderSessionAssessment } from './facebook.js';
@@ -19,9 +21,12 @@ const BACKEND_TIMEOUT_MS = parseBackendTimeout(process.env.BACKEND_TIMEOUT_MS);
 const REAUTH_ADMIN_PORT = parseConfiguredPort(process.env.REAUTH_ADMIN_PORT, 'REAUTH_ADMIN_PORT', 8787);
 const REAUTH_VIEWER_PORT = parseConfiguredPort(process.env.REAUTH_VIEWER_PORT, 'REAUTH_VIEWER_PORT', 6080);
 const REAUTH_LEASE_MS = parseReauthLease(process.env.REAUTH_LEASE_MS);
+const MARKETPLACE_BACKEND = parseBackendKind(process.env.MARKETPLACE_BACKEND);
 
 export interface ServiceOptions {
   backend?: MarketplaceBackend;
+  backendKind?: 'fixture' | 'facebook';
+  facebookMarkets?: readonly FacebookMarket[];
   host?: string;
   port?: number;
   logger?: Pick<Console, 'error'>;
@@ -52,8 +57,9 @@ export interface MarketplaceService {
 }
 
 export function createMarketplaceService(options: ServiceOptions = {}): MarketplaceService {
-  const backend = options.backend ?? new FixtureBackend();
-  const backendName = backendNameSchema.parse(backend.name);
+  if (options.backend !== undefined && options.backendKind === 'facebook') {
+    throw new TypeError('backend and backendKind cannot both select a backend');
+  }
   const host = options.host ?? HOST;
   const port = options.port ?? PORT;
   if (!Number.isInteger(port) || port < 0 || port > 65_535) {
@@ -74,6 +80,15 @@ export function createMarketplaceService(options: ServiceOptions = {}): Marketpl
     ...(options.facebookBaseUrl !== undefined ? { baseUrl: options.facebookBaseUrl } : {}),
     logger
   });
+  const backend = options.backend ?? ((options.backendKind ?? MARKETPLACE_BACKEND) === 'facebook'
+    ? new FacebookMarketplaceBackend({
+      browser,
+      probe: facebook,
+      ...(options.facebookMarkets !== undefined ? { markets: options.facebookMarkets } : {}),
+      logger
+    })
+    : new FixtureBackend());
+  const backendName = backendNameSchema.parse(backend.name);
   const adminPort = options.adminPort ?? REAUTH_ADMIN_PORT;
   const viewerPort = options.reauthViewerPort ?? REAUTH_VIEWER_PORT;
   const leaseMs = options.reauthLeaseMs ?? REAUTH_LEASE_MS;
@@ -258,6 +273,12 @@ function parseHost(value: string | undefined): string {
     throw new Error('HOST must be a non-empty hostname or IP address');
   }
   return host;
+}
+
+export function parseBackendKind(value: string | undefined): 'fixture' | 'facebook' {
+  if (value === undefined || value === 'fixture') return 'fixture';
+  if (value === 'facebook') return 'facebook';
+  throw new RangeError('MARKETPLACE_BACKEND must be either "fixture" or "facebook"');
 }
 
 export function parseBackendTimeout(value: string | undefined): number {

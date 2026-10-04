@@ -13,7 +13,7 @@ import { chromium } from 'playwright';
 import { BrowserSessionManager } from '../src/browser.js';
 import { ProviderError } from '../src/index.js';
 import { createMarketplaceService, type MarketplaceService } from '../src/service.js';
-import { parseBackendTimeout } from '../src/service.js';
+import { parseBackendKind, parseBackendTimeout } from '../src/service.js';
 import * as packageEntry from '../src/index.js';
 import { runBackendOperation } from '../src/tools.js';
 import { FakeReauthRuntime } from './helpers/fake-reauth-runtime.js';
@@ -332,6 +332,33 @@ describe('fixture MCP service', () => {
 
   it('exports ProviderError from the package entry for backend implementers', () => {
     expect(packageEntry.ProviderError).toBe(ProviderError);
+  });
+
+  it('selects the fixture backend by default and supports explicit Facebook selection', async () => {
+    expect(structured(await (await connectClient()).callTool({ name: 'marketplace_status', arguments: {} })).backend).toBe('fixture');
+    await Promise.allSettled(clients.splice(0).map((client) => client.close()));
+    await service.close();
+    service = createMarketplaceService({ host: '127.0.0.1', port: 0, adminPort: 0, backendKind: 'facebook' });
+    await packageEntry.listen(service);
+    const address = service.address();
+    if (!address || typeof address === 'string') throw new Error('Expected a TCP address');
+    baseUrl = `http://127.0.0.1:${address.port}`;
+    const status = structured(await (await connectClient()).callTool({ name: 'marketplace_status', arguments: {} }));
+    expect(status.backend).toBe('facebook');
+    expect(service.browser.getInfo().browserStarted).toBe(false);
+  });
+
+  it('rejects selecting an injected backend and Facebook together', () => {
+    const backend: MarketplaceBackend = { name: 'injected', search: () => [], fetch: () => null };
+    expect(() => createMarketplaceService({ backend, backendKind: 'facebook' }))
+      .toThrow(new TypeError('backend and backendKind cannot both select a backend'));
+  });
+
+  it('parses backend selection explicitly and defaults to fixture', () => {
+    expect(parseBackendKind(undefined)).toBe('fixture');
+    expect(parseBackendKind('fixture')).toBe('fixture');
+    expect(parseBackendKind('facebook')).toBe('facebook');
+    expect(() => parseBackendKind('other')).toThrow(new RangeError('MARKETPLACE_BACKEND must be either "fixture" or "facebook"'));
   });
 
   it('returns status versions and fixture marker without invoking backend operations', async () => {

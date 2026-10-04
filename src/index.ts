@@ -1,6 +1,7 @@
 import { createMarketplaceService, installShutdownHandlers, listen } from './service.js';
 
 export { FixtureBackend, ProviderError, type MarketplaceBackend } from './backend.js';
+export { FacebookMarketplaceBackend, type FacebookMarketplaceBackendOptions } from './facebook-marketplace-backend.js';
 export {
   BROWSER_SESSION_STATUSES,
   BrowserSessionManager,
@@ -25,7 +26,40 @@ export {
   type FacebookPageSnapshot
 } from './facebook.js';
 export { FIXTURE_LISTINGS } from './fixtures.js';
-export { createMarketplaceService, installShutdownHandlers, listen, type MarketplaceService, type ServiceOptions } from './service.js';
+export {
+  DEFAULT_FACEBOOK_MARKETS,
+  MARKETPLACE_ITEM_PATH,
+  buildMarketplaceItemUrl,
+  buildMarketplaceSearchUrl,
+  normalizeLocationKey,
+  parseMarketplaceItemId,
+  resolveFacebookMarket,
+  type FacebookMarket,
+  type FacebookMarketResolution
+} from './facebook-marketplace-url.js';
+export {
+  extractMarketplacePage,
+  MARKETPLACE_EXTRACT_LIMITS,
+  type ExtractedListingCard,
+  type ExtractedMarketplacePage,
+  type ExtractedMarketplaceSignals,
+  type ExtractMarketplaceOptions
+} from './facebook-marketplace-extract.js';
+export {
+  classifyMarketplacePage,
+  interpretMarketplacePage,
+  parseMarketplacePage,
+  parseMarketplacePrice,
+  CURRENCY_SYMBOLS,
+  MARKETPLACE_PAGE_KINDS,
+  PRICE_PARSE_STATUSES,
+  type MarketplacePageKind,
+  type MarketplaceParseResult,
+  type MarketplaceParseStats,
+  type MarketplaceSearchOutcome,
+  type ParseMarketplaceInput
+} from './facebook-marketplace-parse.js';
+export { createMarketplaceService, installShutdownHandlers, listen, parseBackendKind, type MarketplaceService, type ServiceOptions } from './service.js';
 export {
   ReauthManager,
   ProcessReauthRuntime,
