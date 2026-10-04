@@ -291,6 +291,26 @@ browserTests('reauth manager with Chromium', () => {
     }
   }, 10_000);
 
+  it('re-arms the lease expiry when the TTL timer fires before the clock reaches the deadline', async () => {
+    const browser = makeManager({ settleTimeoutMs: 200, launchTimeoutMs: 5_000 });
+    const runtime = makeRuntime();
+    const origin = Date.now();
+    // A half-speed clock makes the TTL timer fire while the injected clock still reports
+    // the lease as unexpired. That is the same timer/clock divergence that drops a real
+    // expiry (observed firing 1 ms early), just deterministic: one early one-shot fire
+    // must not be able to lose the expiry.
+    const reauth = makeReauth(browser, runtime, {
+      leaseMs: 100,
+      now: () => origin + (Date.now() - origin) / 2
+    });
+    await reauth.start();
+
+    await waitForPhase(reauth, 'idle', 3_000);
+    expect(reauth.status()).toMatchObject({ phase: 'idle', lease: null, expiresAt: null });
+    expect(browser.getInfo().interactive).not.toBe(true);
+    expect(runtime.children.every(isProcessGone)).toBe(true);
+  }, 10_000);
+
   it('expires a lease through the same cleanup path as stop', async () => {
     const browser = makeManager();
     const runtime = makeRuntime();

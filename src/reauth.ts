@@ -298,18 +298,30 @@ export class ReauthManager {
         void this.stop();
       }
       const expiryGeneration = ++this.leaseExpiryGeneration;
-      const timerDelay = Math.max(0, expiresAt - this.now());
-      this.ttlTimer = setTimeout(() => { void this.enqueue(async () => {
-        if (expiryGeneration === this.leaseExpiryGeneration && this.lease?.id === id && Date.parse(this.lease.expiresAt) <= this.now()) {
+      // A one-shot timer can fire a hair before the wall clock reaches the deadline:
+      // libuv timers run on a monotonic clock while this.now() is wall-clock, and the two
+      // disagree by a millisecond often enough to matter (observed firing 1 ms early).
+      // Dropping that wakeup stranded the lease as active forever, holding the browser
+      // profile and the console past the TTL, so re-arm until the deadline has passed.
+      const armExpiry = (): void => {
+        const remaining = Math.max(0, expiresAt - this.now());
+        this.ttlTimer = setTimeout(() => { void this.enqueue(async () => {
+          const current = this.lease;
+          if (expiryGeneration !== this.leaseExpiryGeneration || !current || current.id !== id) return;
+          if (Date.parse(current.expiresAt) > this.now()) {
+            armExpiry();
+            return;
+          }
           this.suppressProcessExit = true;
           try {
             await this.cleanupSession();
           } finally {
             this.suppressProcessExit = false;
           }
-        }
-      }); }, timerDelay);
-      this.ttlTimer.unref?.();
+        }); }, remaining);
+        this.ttlTimer.unref?.();
+      };
+      armExpiry();
       return lease;
     } catch (error) {
       this.logger.error(`Reauth startup failed; phase rollback; lease ${id}`);
