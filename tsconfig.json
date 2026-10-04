@@ -11,6 +11,10 @@
     "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true,
     "skipLibCheck": true,
+    // TypeScript 6+ defaults `types` to [], so global type packages are no
+    // longer auto-included from node_modules/@types. `node` supplies process,
+    // Buffer, and the node: builtin module declarations.
+    "types": ["node"],
     "declaration": true,
     "sourceMap": true
   },
