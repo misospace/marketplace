@@ -44,7 +44,12 @@ jobs:
       - name: Lint
         run: npm run lint
       - name: Test
-        run: npm run test
+        # Serialize test files for the required-browser pass. The Chromium lifecycle
+        # tests are individually bounded and correct, but running several
+        # browser-heavy files concurrently adds enough scheduler contention that
+        # recovery operations intermittently exceed those deliberately tight bounds.
+        # Ordinary local `npm test` keeps vitest's default file parallelism.
+        run: npm run test -- --fileParallelism=false
         env:
           REQUIRE_BROWSER_TESTS: "1"
       - name: Build
