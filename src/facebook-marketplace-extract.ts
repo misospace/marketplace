@@ -1,0 +1,227 @@
+export const MARKETPLACE_EXTRACT_LIMITS = {
+  maxCards: 60,
+  maxCardTextLength: 600,
+  maxImages: 8,
+  maxHrefs: 12,
+  maxAriaLabels: 8,
+  maxAncestorLevels: 8
+} as const;
+
+export interface ExtractedListingCard {
+  itemHref: string;
+  hrefs: string[];
+  text: string;
+  ariaLabels: string[];
+  imageUrls: string[];
+  headingText: string | null;
+  timeDateTime: string | null;
+  timeText: string | null;
+  profileHref: string | null;
+}
+
+export interface ExtractedMarketplaceSignals {
+  hasLoginForm: boolean;
+  hasCheckpoint: boolean;
+  hasCaptcha: boolean;
+  hasRateLimitNotice: boolean;
+  hasNoResultsNotice: boolean;
+}
+
+export interface ExtractedMarketplacePage {
+  url: string;
+  signals: ExtractedMarketplaceSignals;
+  cards: ExtractedListingCard[];
+}
+
+export interface ExtractMarketplaceOptions {
+  itemPath: string;
+  limits: Omit<typeof MARKETPLACE_EXTRACT_LIMITS, 'maxCards'> & { maxCards: number };
+}
+
+export function extractMarketplacePage(options: ExtractMarketplaceOptions): ExtractedMarketplacePage {
+  const itemPath = options.itemPath;
+  const limits = options.limits;
+  const boundedLimit = (value: number): number => Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
+  const maxCards = boundedLimit(limits.maxCards);
+  const maxCardTextLength = boundedLimit(limits.maxCardTextLength);
+  const maxImages = boundedLimit(limits.maxImages);
+  const maxHrefs = boundedLimit(limits.maxHrefs);
+  const maxAriaLabels = boundedLimit(limits.maxAriaLabels);
+  const maxAncestorLevels = boundedLimit(limits.maxAncestorLevels);
+  const boundedHref = (value: string): string => value.slice(0, 2048);
+  const escapedItemPath = itemPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const itemIdPattern = new RegExp(`${escapedItemPath}(\\d{5,20})(?=\\/|$)`);
+  const normalisedLines = (element: Element): string => {
+    const innerText = (element as HTMLElement).innerText;
+    const raw = typeof innerText === 'string' && innerText.length > 0 ? innerText : (element.textContent ?? '');
+    return raw.split('\n').map((line) => line.replace(/\s+/g, ' ').trim()).filter(Boolean).join('\n');
+  };
+  const itemIdFromHref = (href: string): string | null => {
+    let pathname: string;
+    try {
+      const baseUrl = /^https?:\/\//i.test(location.href) ? location.href : 'https://www.facebook.com/';
+      pathname = new URL(href, baseUrl).pathname;
+    } catch {
+      return null;
+    }
+    const match = pathname.match(itemIdPattern);
+    return match?.[1] ?? null;
+  };
+  const subtreeItemIds = (root: Element): string[] => {
+    const ids = new Set<string>();
+    if (root.matches('a[href]')) {
+      const ownId = itemIdFromHref((root as HTMLAnchorElement).href);
+      if (ownId) ids.add(ownId);
+    }
+    for (const anchor of root.querySelectorAll('a[href]')) {
+      const id = itemIdFromHref((anchor as HTMLAnchorElement).href);
+      if (id) {
+        ids.add(id);
+        if (ids.size > 1) break;
+      }
+    }
+    return [...ids];
+  };
+
+  // Card policy: find item anchors, walk upward to the highest bounded ancestor containing exactly one distinct item id, then deduplicate roots in document order.
+  const cardRoots: Element[] = [];
+  const seenRoots = new Set<Element>();
+  const anchors = document.querySelectorAll('a[href]');
+  let candidateAnchorsVisited = 0;
+  for (let anchorIndex = 0; anchorIndex < anchors.length
+    && cardRoots.length < maxCards
+    && candidateAnchorsVisited < maxCards; anchorIndex += 1) {
+    const anchor = anchors[anchorIndex];
+    if (!anchor || !itemIdFromHref((anchor as HTMLAnchorElement).href)) continue;
+    let knownCardAncestor: Element | null = anchor.parentElement;
+    let belongsToKnownCard = false;
+    while (knownCardAncestor) {
+      if (seenRoots.has(knownCardAncestor)) {
+        belongsToKnownCard = true;
+        break;
+      }
+      if (knownCardAncestor.matches('main, body, html')) break;
+      knownCardAncestor = knownCardAncestor.parentElement;
+    }
+    if (belongsToKnownCard) continue;
+    candidateAnchorsVisited += 1;
+    let current: Element | null = anchor;
+    let selected: Element = anchor;
+    for (let level = 0; level < maxAncestorLevels && current; level += 1) {
+      if (current.matches('main, body, html')) break;
+      if (subtreeItemIds(current).length === 1) selected = current;
+      current = current.parentElement;
+    }
+    if (!seenRoots.has(selected)) {
+      seenRoots.add(selected);
+      cardRoots.push(selected);
+    }
+  }
+
+  const cards: ExtractedListingCard[] = cardRoots.map((root) => {
+    const anchors: HTMLAnchorElement[] = [];
+    if (root.matches('a[href]')) anchors.push(root as HTMLAnchorElement);
+    anchors.push(...Array.from(root.querySelectorAll('a[href]')) as HTMLAnchorElement[]);
+    const itemAnchors = anchors.filter((anchor) => itemIdFromHref(anchor.href) !== null);
+    let itemAnchor = itemAnchors[0];
+    for (const anchor of itemAnchors.slice(1)) {
+      if ((anchor.textContent ?? '').length > (itemAnchor?.textContent ?? '').length) itemAnchor = anchor;
+    }
+
+    const hrefs = maxHrefs > 0 ? anchors.slice(0, maxHrefs).map((anchor) => boundedHref(anchor.href)) : [];
+    const text = normalisedLines(root).slice(0, maxCardTextLength);
+    const ariaLabels: string[] = [];
+    const seenLabels = new Set<string>();
+    const ariaElements: Element[] = [root, ...root.querySelectorAll('[aria-label]')];
+    for (const element of ariaElements) {
+      const label = element.getAttribute('aria-label')?.trim();
+      if (maxAriaLabels > 0 && label && !seenLabels.has(label)) {
+        seenLabels.add(label);
+        ariaLabels.push(label.slice(0, maxCardTextLength));
+        if (ariaLabels.length >= maxAriaLabels) break;
+      }
+    }
+
+    const imageUrls: string[] = [];
+    const seenImages = new Set<string>();
+    for (const image of root.querySelectorAll('img[src]')) {
+      if (maxImages <= 0) break;
+      const src = (image as HTMLImageElement).src;
+      if (!src || src.toLowerCase().startsWith('data:') || seenImages.has(src)) continue;
+      seenImages.add(src);
+      imageUrls.push(boundedHref(src));
+      if (imageUrls.length >= maxImages) break;
+    }
+
+    const heading = root.querySelector('h1,h2,h3,h4,h5,h6,[role="heading"]');
+    const headingText = heading ? normalisedLines(heading).slice(0, maxCardTextLength) || null : null;
+    const time = root.querySelector('time');
+    const dateTime = time?.getAttribute('datetime')?.trim().slice(0, maxCardTextLength) ?? '';
+    const timeTextValue = time ? normalisedLines(time).slice(0, maxCardTextLength) : '';
+    let profileHref: string | null = null;
+    for (const anchor of anchors) {
+      try {
+        if (anchor.pathname.includes('/marketplace/profile/') || anchor.pathname.includes('/profile.php')) {
+          profileHref = boundedHref(anchor.href);
+          break;
+        }
+      } catch {
+        // Ignore malformed hrefs; the browser normally resolves anchor.href before it reaches this point.
+      }
+    }
+
+    return {
+      itemHref: boundedHref(itemAnchor?.href ?? ''),
+      hrefs,
+      text,
+      ariaLabels,
+      imageUrls,
+      headingText,
+      timeDateTime: dateTime || null,
+      timeText: timeTextValue || null,
+      profileHref
+    };
+  });
+
+  const cardRootSet = new Set(cardRoots);
+  const allCardAncestorSet = new Set<Element>();
+  for (const anchor of document.querySelectorAll('a[href]')) {
+    if (!itemIdFromHref((anchor as HTMLAnchorElement).href)) continue;
+    let ancestor: Element | null = anchor;
+    while (ancestor && !ancestor.matches('main, body, html')) {
+      allCardAncestorSet.add(ancestor);
+      ancestor = ancestor.parentElement;
+    }
+  }
+  // If the results grid is itself main/body/html, only that boundary can contain each item link, so card prose remains in signal text.
+  const pageTextParts: string[] = [];
+  const textWalker = document.createTreeWalker(document.body ?? document.documentElement, 4);
+  let textNode: Node | null = textWalker.nextNode();
+  while (textNode) {
+    let ancestor = textNode.parentElement;
+    let insideCard = false;
+    while (ancestor) {
+      if (cardRootSet.has(ancestor) || allCardAncestorSet.has(ancestor)) {
+        insideCard = true;
+        break;
+      }
+      ancestor = ancestor.parentElement;
+    }
+    if (!insideCard && textNode.textContent) pageTextParts.push(textNode.textContent);
+    textNode = textWalker.nextNode();
+  }
+  const bodyText = pageTextParts.join(' ').replace(/\s+/g, ' ').slice(0, 20000);
+  // Auth/interstitial selectors intentionally mirror the session probe in src/facebook.ts; duplication is deliberate because an in-page function cannot reference module scope.
+  const signals: ExtractedMarketplaceSignals = {
+    hasLoginForm: document.querySelector('input[type="password"], form[action*="/login"], input[name="pass"]') !== null,
+    hasCheckpoint: document.querySelector('form[action*="checkpoint"], [data-testid*="checkpoint"]') !== null
+      || /security check|confirm your identity|unusual activity/i.test(bodyText),
+    hasCaptcha: document.querySelector('iframe[src*="captcha" i], [id*="captcha" i], [data-testid*="captcha" i]') !== null
+      || /captcha|i'?m not a robot|verify you are a human/i.test(bodyText),
+    // Rate-limit detection is deliberately conservative and text-based.
+    hasRateLimitNotice: /you'?re temporarily blocked|temporarily blocked|we limit how often|too many requests|try again later|please try again later/i.test(bodyText),
+    hasNoResultsNotice: /no results|no listings|no items found|nothing found|try a different search|no marketplace listings/i.test(bodyText)
+  };
+
+  return { url: location.href.slice(0, 2048), signals, cards };
+}
