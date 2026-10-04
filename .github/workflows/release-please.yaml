@@ -1,0 +1,52 @@
+# Maintains a standing "release: X.Y.Z" PR listing everything unreleased.
+# Merging it is the release decision — nothing here merges on your behalf:
+# release-please-action v5 has no auto-merge input, and none is set here.
+#
+# The app token matters. Events raised by the default GITHUB_TOKEN do not
+# trigger other workflows, so a tag pushed that way would never fire
+# publish-image.yml (keyed off `v*.*.*` tags). A GitHub App token does.
+#
+# MISO_* is deliberately a different app from the BOT_* one ai-pr-review.yaml
+# uses: GitHub will not let a PR's author approve its own PR, so a release PR
+# authored by MISO can still be approved, or have changes requested, by BOT.
+name: Release Please
+
+on:
+  push:
+    branches: ["main"]
+
+# Serialize runs. Several pushes land on main in quick succession when a batch
+# of PRs merges, and without this the runs overlap: two of them both decide to
+# create the same release, the second loses, and the job goes red with
+# `Validation Failed: {"resource":"Release","code":"already_exists"}`.
+#
+# cancel-in-progress is false on purpose: a cancelled run could stop between
+# creating the tag and creating the release. Queueing instead lets the later
+# run observe the finished state and no-op.
+concurrency:
+  group: release-please-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  release-please:
+    name: Release Please
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Generate bot token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.MISO_APP_ID }}
+          private-key: ${{ secrets.MISO_APP_PRIVATE_KEY }}
+
+      - name: Create or update release PR
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
