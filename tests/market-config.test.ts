@@ -104,6 +104,26 @@ describe('runtime market map', () => {
     expect(message).not.toContain('MARKER_VALUE');
   });
 
+  it('does not echo file contents when the JSON is malformed', () => {
+    // V8's SyntaxError quotes the offending input, so the parser detail must not be threaded
+    // through to startup logs.
+    const path = write('{ "MARKER_VALUE": oops');
+    let message = '';
+    try {
+      loadFacebookMarkets(path);
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toContain('is not valid JSON');
+    expect(message).not.toContain('MARKER_VALUE');
+  });
+
+  it('rejects a path that is not a regular file', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'market-config-'));
+    dirs.push(dir);
+    expect(() => loadFacebookMarkets(dir)).toThrow('not a regular file');
+  });
+
   it('prefers FACEBOOK_MARKETS_FILE and falls back to the deprecated name', () => {
     expect(facebookMarketsFilePath({ FACEBOOK_MARKETS_FILE: '/new.json', MARKETPLACE_MARKETS_FILE: '/old.json' })).toBe('/new.json');
     expect(facebookMarketsFilePath({ MARKETPLACE_MARKETS_FILE: '/old.json' })).toBe('/old.json');

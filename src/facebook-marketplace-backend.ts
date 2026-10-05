@@ -16,6 +16,7 @@ import {
   MARKETPLACE_ITEM_PATH,
   buildMarketplaceSearchUrl,
   resolveFacebookMarket,
+  validateFacebookMarkets,
   type FacebookMarket
 } from './facebook-marketplace-url.js';
 import { assertFacebookOrigin, FacebookSessionProbe } from './facebook.js';
@@ -65,8 +66,9 @@ export class FacebookMarketplaceBackend implements MarketplaceBackend {
       throw new RangeError(`maxCards must be an integer from 1 to ${MARKETPLACE_EXTRACT_LIMITS.maxCards}`);
     }
     if (!Array.isArray(this.markets)) throw new TypeError('markets must be an array');
-    // Resolve once against a sentinel so invalid market configuration is rejected during construction.
-    resolveFacebookMarket('__market_validation_sentinel__', this.markets);
+    // Validate during construction, with the same rules a configured markets file is held to, so
+    // a bad map fails at startup instead of resolving ambiguously on every search.
+    validateFacebookMarkets(this.markets);
   }
 
   async search(input: ReturnType<typeof searchInputSchema.parse>, signal: AbortSignal): Promise<Listing[]> {

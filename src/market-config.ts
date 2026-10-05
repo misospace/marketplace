@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync, type Stats } from 'node:fs';
 import { z } from 'zod';
 import { validateFacebookMarkets, validateMarket, type FacebookMarket } from './facebook-marketplace-url.js';
 
@@ -37,6 +37,22 @@ export function loadFacebookMarkets(path: string | undefined): readonly Facebook
   if (path === undefined || !path.trim()) return undefined;
   const source = `the Facebook markets file at ${path}`;
 
+  let stats: Stats;
+  try {
+    // statSync, not lstatSync: it follows symlinks, which is how a Kubernetes ConfigMap volume
+    // projects a file. Reject anything that is not a regular file first, because readFileSync
+    // would block indefinitely on a FIFO or device path.
+    stats = statSync(path);
+  } catch (error) {
+    throw new Error(`Could not read ${source}: ${describe(error)}`);
+  }
+  if (!stats.isFile()) throw new Error(`Could not read ${source}: not a regular file`);
+  // Bound before reading. readFileSync pulls the whole file into memory, so checking the size
+  // afterwards would let an oversized file exhaust memory instead of failing cleanly.
+  if (stats.size > MAX_MARKETS_FILE_BYTES) {
+    throw new RangeError(`${source} is larger than the ${MAX_MARKETS_FILE_BYTES} byte limit`);
+  }
+
   let contents: Buffer;
   try {
     contents = readFileSync(path);
@@ -44,14 +60,17 @@ export function loadFacebookMarkets(path: string | undefined): readonly Facebook
     throw new Error(`Could not read ${source}: ${describe(error)}`);
   }
   if (contents.byteLength > MAX_MARKETS_FILE_BYTES) {
+    // The file grew between the stat and the read.
     throw new RangeError(`${source} is larger than the ${MAX_MARKETS_FILE_BYTES} byte limit`);
   }
 
   let value: unknown;
   try {
     value = JSON.parse(stripByteOrderMark(contents.toString('utf8')));
-  } catch (error) {
-    throw new TypeError(`${source} is not valid JSON: ${describe(error)}`);
+  } catch {
+    // V8's SyntaxError message quotes the offending input, so the parser detail is dropped
+    // rather than echoed into startup logs.
+    throw new TypeError(`${source} is not valid JSON`);
   }
 
   const parsed = marketsSchema.safeParse(value);
