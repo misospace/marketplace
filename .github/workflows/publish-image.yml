@@ -35,7 +35,9 @@ jobs:
       - name: Lint
         run: npm run lint
       - name: Test
-        run: npm run test
+        # Match ci.yml: serialize the required-browser files so the deliberately tight
+        # Chromium lifecycle bounds are not competing with other browser-heavy files.
+        run: npm run test -- --fileParallelism=false
         env:
           REQUIRE_BROWSER_TESTS: "1"
       - name: Build

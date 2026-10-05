@@ -31,7 +31,7 @@ export type FacebookMarketResolution =
   | { readonly ok: true; readonly market: FacebookMarket }
   | { readonly ok: false; readonly reason: 'unknown' | 'ambiguous'; readonly candidates: readonly string[] };
 
-function validateMarket(market: FacebookMarket): void {
+export function validateMarket(market: FacebookMarket): void {
   if (typeof market !== 'object' || market === null) throw new TypeError('Market configuration must be an object');
   if (typeof market.slug !== 'string' || !/^[a-z0-9][a-z0-9-]*$/.test(market.slug)) {
     throw new TypeError('Market slug is invalid');
@@ -45,11 +45,7 @@ function validateMarket(market: FacebookMarket): void {
   }
 }
 
-export function resolveFacebookMarket(
-  location: string,
-  markets: readonly FacebookMarket[] = DEFAULT_FACEBOOK_MARKETS
-): FacebookMarketResolution {
-  if (typeof location !== 'string' || !normalizeLocationKey(location)) throw new TypeError('Location must not be blank');
+function buildMarketIndex(markets: readonly FacebookMarket[]): Map<string, Map<string, FacebookMarket>> {
   if (!Array.isArray(markets)) throw new TypeError('Markets must be an array');
 
   const keyToMarkets = new Map<string, Map<string, FacebookMarket>>();
@@ -73,6 +69,31 @@ export function resolveFacebookMarket(
       matches.set(market.slug, market);
     }
   }
+
+  return keyToMarkets;
+}
+
+/**
+ * Validates a whole market set: every entry must satisfy `validateMarket`, slugs must be unique,
+ * and no label or alias may map to two different markets. The rules themselves are shared with
+ * `resolveFacebookMarket`, so a configured map cannot drift from the built-in one.
+ *
+ * The last rule is stricter than lookup: `resolveFacebookMarket` merely reports such a location as
+ * `ambiguous`, whereas a configured file fails validation outright rather than silently making a
+ * location unresolvable.
+ */
+export function validateFacebookMarkets(markets: readonly FacebookMarket[]): void {
+  for (const matches of buildMarketIndex(markets).values()) {
+    if (matches.size > 1) throw new TypeError('Market keys must not map to different market configurations');
+  }
+}
+
+export function resolveFacebookMarket(
+  location: string,
+  markets: readonly FacebookMarket[] = DEFAULT_FACEBOOK_MARKETS
+): FacebookMarketResolution {
+  if (typeof location !== 'string' || !normalizeLocationKey(location)) throw new TypeError('Location must not be blank');
+  const keyToMarkets = buildMarketIndex(markets);
 
   const matches = keyToMarkets.get(normalizeLocationKey(location));
   if (!matches || matches.size === 0) return { ok: false, reason: 'unknown', candidates: [] };
