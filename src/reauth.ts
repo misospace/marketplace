@@ -124,6 +124,8 @@ export interface ReauthManagerOptions {
   logger?: Pick<Console, 'error' | 'info'>;
 }
 
+type ReauthStartupStage = 'profile-lock' | 'temporary-files' | 'xvfb' | 'x11vnc' | 'websockify' | 'chromium' | 'facebook-navigation' | 'lease';
+
 export class ReauthManager {
   private readonly browser: BrowserSessionManager;
   private readonly runtime: ReauthRuntime;
@@ -244,9 +246,11 @@ export class ReauthManager {
     this.unexpectedProcessExit = undefined;
     this.setPhase('starting', this.currentLeaseId);
     const id = this.currentLeaseId;
+    let stage: ReauthStartupStage = 'profile-lock';
     try {
       this.browserOwnership = true;
       await this.browser.beginInteractive();
+      stage = 'temporary-files';
       this.tempDir = mkdtempSync(join(tmpdir(), 'marketplace-reauth-'));
       chmodSync(this.tempDir, 0o700);
       const password = generatePassword();
@@ -254,18 +258,21 @@ export class ReauthManager {
       writeFileSync(this.passwordFile, password, { encoding: 'utf8', mode: 0o600 });
       chmodSync(this.passwordFile, 0o600);
 
+      stage = 'xvfb';
       const display = await this.runtime.startDisplay();
       this.display = display.display;
       this.displayHandle = display.handle;
       this.watchProcess(this.displayHandle);
       if (this.unexpectedProcessExit) throw new Error(`Reauth process exited during startup: ${this.unexpectedProcessExit}`);
       if (this.stopping) throw new Error('Reauth session startup was stopped');
+      stage = 'x11vnc';
       this.rfbPort = await this.runtime.allocatePort();
       validatePort(this.rfbPort, 'allocated RFB port', false);
       this.vncHandle = await this.runtime.startVnc({ display: this.display, port: this.rfbPort, passwordFile: this.passwordFile });
       this.watchProcess(this.vncHandle);
       if (this.unexpectedProcessExit) throw new Error(`Reauth process exited during startup: ${this.unexpectedProcessExit}`);
       if (this.stopping) throw new Error('Reauth session startup was stopped');
+      stage = 'websockify';
       if (this.configuredViewerPort === undefined) this.selectedViewerPort = await this.runtime.allocatePort();
       validatePort(this.selectedViewerPort, 'viewerPort', false);
       this.viewerHandle = await this.runtime.startViewer({ port: this.selectedViewerPort, rfbPort: this.rfbPort });
@@ -273,13 +280,16 @@ export class ReauthManager {
       if (this.unexpectedProcessExit) throw new Error(`Reauth process exited during startup: ${this.unexpectedProcessExit}`);
       if (this.stopping) throw new Error('Reauth session startup was stopped');
 
+      stage = 'chromium';
       const context = await this.browser.openInteractive({ display: this.display, headless: !this.runtime.providesDisplay });
       const pages = context.pages();
       const page = pages[0] ?? await context.newPage();
       if (this.unexpectedProcessExit) throw new Error(`Reauth process exited during startup: ${this.unexpectedProcessExit}`);
+      stage = 'facebook-navigation';
       await page.goto(this.targetUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
       if (this.unexpectedProcessExit) throw new Error(`Reauth process exited during startup: ${this.unexpectedProcessExit}`);
 
+      stage = 'lease';
       const startedAt = this.now();
       const expiresAt = startedAt + this.leaseMs;
       const lease: ReauthLease = {
@@ -324,7 +334,8 @@ export class ReauthManager {
       armExpiry();
       return lease;
     } catch (error) {
-      this.logger.error(`Reauth startup failed; phase rollback; lease ${id}`);
+      const code = safeErrorCode(error);
+      this.logger.error(`Reauth startup failed; stage ${stage}${code ? `; code ${code}` : ''}; phase rollback; lease ${id}`);
       this.suppressProcessExit = true;
       try {
         await this.cleanupSession();
@@ -588,6 +599,12 @@ function generatePassword(): string {
   let password = '';
   for (const byte of bytes) password += PASSWORD_ALPHABET[byte % PASSWORD_ALPHABET.length];
   return password;
+}
+
+function safeErrorCode(error: unknown): string | undefined {
+  if (!error || typeof error !== 'object' || !('code' in error)) return undefined;
+  const code = error.code;
+  return typeof code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(code) ? code : undefined;
 }
 
 function validatePort(port: number, name: string, allowZero: boolean): void {
