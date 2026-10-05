@@ -1,3 +1,4 @@
+import { EventEmitter } from 'node:events';
 import { createServer, type Server } from 'node:http';
 import { mkdtempSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -62,9 +63,9 @@ describe('browser launch args', () => {
               launchCount += 1;
               if (launchCount === 1) {
                 await firstLaunch;
-                return { close: async () => { firstContextClosed = true; }, once: () => undefined };
+                return { close: async () => { firstContextClosed = true; }, once: () => undefined, browser: () => null };
               }
-              return { close: async () => undefined, once: () => undefined };
+              return { close: async () => undefined, once: () => undefined, browser: () => null };
             }
           }
         } as unknown as typeof import('playwright'));
@@ -97,7 +98,7 @@ describe('browser launch args', () => {
           chromium: {
             launchPersistentContext: async () => {
               launchCount += 1;
-              return { close: async () => undefined, once: () => undefined };
+              return { close: async () => undefined, once: () => undefined, browser: () => null };
             }
           }
         } as unknown as typeof import('playwright'));
@@ -130,7 +131,7 @@ describe('browser launch args', () => {
             launchPersistentContext: async (_profileDir: string, options: { args?: string[]; env?: NodeJS.ProcessEnv }) => {
               launchArgs = options.args;
               launchEnvironment = options.env;
-              return { close: async () => undefined, once: () => undefined };
+              return { close: async () => undefined, once: () => undefined, browser: () => null };
             }
           }
         } as unknown as typeof import('playwright'));
@@ -157,6 +158,62 @@ describe('browser launch args', () => {
         else process.env[key] = value;
       }
     }
+  });
+
+  it('reports renderer exits without logging target URLs or identifiers', async () => {
+    const errors: string[] = [];
+    const calls: Array<{ method: string; params?: object }> = [];
+    const secretUrl = 'https://facebook.example/two_step?encrypted_context=secret-value';
+    const session = new EventEmitter() as EventEmitter & {
+      send(method: string, params?: object): Promise<unknown>;
+      detach(): Promise<void>;
+    };
+    session.send = async (method, params) => {
+      calls.push({ method, params });
+      return {};
+    };
+    session.detach = async () => undefined;
+
+    const page = new EventEmitter();
+    const context = new EventEmitter() as EventEmitter & {
+      close(): Promise<void>;
+      browser(): { newBrowserCDPSession(): Promise<typeof session> };
+      pages(): typeof page[];
+    };
+    context.close = async () => undefined;
+    context.browser = () => ({ newBrowserCDPSession: async () => session });
+    context.pages = () => [page];
+
+    const manager = new class extends BrowserManager {
+      loadPlaywright(): Promise<typeof import('playwright')> {
+        return Promise.resolve({
+          chromium: {
+            launchPersistentContext: async () => context
+          }
+        } as unknown as typeof import('playwright'));
+      }
+    }({ profileDir: makeProfileDir(), logger: { error: (message) => errors.push(String(message)) } });
+    managers.push(manager);
+
+    await manager.beginInteractive();
+    await manager.openInteractive({ headless: true });
+    page.emit('crash');
+    session.emit('Target.targetCreated', {
+      targetInfo: { targetId: 'sensitive-frame-id', type: 'iframe', url: secretUrl }
+    });
+    session.emit('Target.targetCrashed', { targetId: 'sensitive-frame-id', status: 'crashed', errorCode: -11 });
+    session.emit('Target.targetCrashed', { targetId: 'untracked-target-id', status: 'oom', errorCode: 9 });
+
+    expect(errors).toEqual([
+      'Reauth page renderer crashed',
+      'Reauth iframe renderer exited; status crashed; code -11'
+    ]);
+    expect(JSON.stringify(errors)).not.toContain(secretUrl);
+    expect(JSON.stringify(errors)).not.toContain('sensitive-frame-id');
+    expect(JSON.stringify(errors)).not.toContain('secret-value');
+
+    await manager.close();
+    expect(calls).toContainEqual({ method: 'Target.setDiscoverTargets', params: { discover: false } });
   });
 });
 

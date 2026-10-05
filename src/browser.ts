@@ -1,7 +1,11 @@
 import { existsSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
-import type { BrowserContext, Page } from 'playwright';
+import type { BrowserContext, CDPSession, Page } from 'playwright';
+
+type TargetCreatedDiagnosticEvent = { targetInfo: { targetId: string; type: string } };
+type TargetDestroyedDiagnosticEvent = { targetId: string };
+type TargetCrashedDiagnosticEvent = { targetId: string; status: string; errorCode: number };
 
 export const BROWSER_SESSION_STATUSES = [
   'browser_unavailable',
@@ -49,6 +53,18 @@ export class BrowserUnavailableError extends Error {
   }
 }
 
+interface InteractiveRendererDiagnostics {
+  context: BrowserContext;
+  session: CDPSession;
+  iframeTargets: Set<string>;
+  pages: Set<Page>;
+  onTargetCreated: (event: TargetCreatedDiagnosticEvent) => void;
+  onTargetDestroyed: (event: TargetDestroyedDiagnosticEvent) => void;
+  onTargetCrashed: (event: TargetCrashedDiagnosticEvent) => void;
+  onPage: (page: Page) => void;
+  onPageCrash: () => void;
+}
+
 const providerSessionAssessmentSet = new Set<ProviderSessionAssessment>(PROVIDER_SESSION_ASSESSMENTS);
 
 export class BrowserSessionManager {
@@ -61,6 +77,7 @@ export class BrowserSessionManager {
   private readonly logger: Pick<Console, 'error'>;
   private context: BrowserContext | undefined;
   private interactiveBrowserContext: BrowserContext | undefined;
+  private interactiveRendererDiagnostics: InteractiveRendererDiagnostics | undefined;
   private interactive = false;
   private interactiveLaunchInvalidated = false;
   private interactiveBegin: Promise<void> | undefined;
@@ -278,7 +295,9 @@ export class BrowserSessionManager {
       this.interactiveBrowserContext = context;
       context.once('close', () => {
         if (this.interactiveBrowserContext === context) this.interactiveBrowserContext = undefined;
+        void this.closeInteractiveRendererDiagnostics();
       });
+      await this.watchInteractiveRenderer(context);
       return context;
     })();
     this.interactiveLaunch = launch;
@@ -310,10 +329,101 @@ export class BrowserSessionManager {
     const context = this.interactiveBrowserContext;
     if (context) {
       try {
+        await this.closeInteractiveRendererDiagnostics();
         await this.closePersistentContext(context, 'Interactive browser context');
       } finally {
         if (this.interactiveBrowserContext === context) this.interactiveBrowserContext = undefined;
       }
+    }
+  }
+
+  private async watchInteractiveRenderer(context: BrowserContext): Promise<void> {
+    const browser = context.browser();
+    if (!browser) return;
+
+    let session: CDPSession;
+    try {
+      session = await browser.newBrowserCDPSession();
+    } catch {
+      this.logInteractiveRendererDiagnostic('Reauth renderer diagnostics unavailable');
+      return;
+    }
+
+    const iframeTargets = new Set<string>();
+    const pages = new Set<Page>();
+    const onTargetCreated = ({ targetInfo }: TargetCreatedDiagnosticEvent): void => {
+      if (targetInfo.type === 'iframe') iframeTargets.add(targetInfo.targetId);
+    };
+    const onTargetDestroyed = ({ targetId }: TargetDestroyedDiagnosticEvent): void => {
+      iframeTargets.delete(targetId);
+    };
+    const onTargetCrashed = ({ targetId, status, errorCode }: TargetCrashedDiagnosticEvent): void => {
+      if (!iframeTargets.delete(targetId)) return;
+      const safeStatus = status === 'crashed' || status === 'oom' || status === 'killed' ? status : 'unknown';
+      const safeCode = Number.isSafeInteger(errorCode) && Math.abs(errorCode) <= 65_535 ? String(errorCode) : 'unknown';
+      this.logInteractiveRendererDiagnostic(`Reauth iframe renderer exited; status ${safeStatus}; code ${safeCode}`);
+    };
+    const onPageCrash = (): void => {
+      this.logInteractiveRendererDiagnostic('Reauth page renderer crashed');
+    };
+    const onPage = (page: Page): void => {
+      pages.add(page);
+      page.on('crash', onPageCrash);
+      page.once('close', () => pages.delete(page));
+    };
+    const diagnostics: InteractiveRendererDiagnostics = {
+      context,
+      session,
+      iframeTargets,
+      pages,
+      onTargetCreated,
+      onTargetDestroyed,
+      onTargetCrashed,
+      onPage,
+      onPageCrash
+    };
+    this.interactiveRendererDiagnostics = diagnostics;
+    session.on('Target.targetCreated', onTargetCreated);
+    session.on('Target.targetDestroyed', onTargetDestroyed);
+    session.on('Target.targetCrashed', onTargetCrashed);
+    context.on('page', onPage);
+    for (const page of context.pages()) onPage(page);
+
+    try {
+      await session.send('Target.setDiscoverTargets', { discover: true });
+    } catch {
+      this.logInteractiveRendererDiagnostic('Reauth renderer diagnostics unavailable');
+      await this.closeInteractiveRendererDiagnostics();
+    }
+  }
+
+  private async closeInteractiveRendererDiagnostics(): Promise<void> {
+    const diagnostics = this.interactiveRendererDiagnostics;
+    this.interactiveRendererDiagnostics = undefined;
+    if (!diagnostics) return;
+
+    diagnostics.context.off('page', diagnostics.onPage);
+    for (const page of diagnostics.pages) page.off('crash', diagnostics.onPageCrash);
+    diagnostics.session.off('Target.targetCreated', diagnostics.onTargetCreated);
+    diagnostics.session.off('Target.targetDestroyed', diagnostics.onTargetDestroyed);
+    diagnostics.session.off('Target.targetCrashed', diagnostics.onTargetCrashed);
+    try {
+      await diagnostics.session.send('Target.setDiscoverTargets', { discover: false });
+    } catch {
+      // The context may already be closing.
+    }
+    try {
+      await diagnostics.session.detach();
+    } catch {
+      // The browser may already have detached the CDP session.
+    }
+  }
+
+  private logInteractiveRendererDiagnostic(message: string): void {
+    try {
+      this.logger.error(message);
+    } catch {
+      // Renderer diagnostics must not interrupt a reauth lease.
     }
   }
 
