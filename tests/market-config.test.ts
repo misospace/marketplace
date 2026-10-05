@@ -105,9 +105,11 @@ describe('runtime market map', () => {
   });
 
   it('does not echo file contents when the JSON is malformed', () => {
-    // V8's SyntaxError quotes the offending input, so the parser detail must not be threaded
-    // through to startup logs.
-    const path = write('{ "MARKER_VALUE": oops');
+    // V8's SyntaxError quotes a window of the offending input, so the parser detail must not be
+    // threaded through to startup logs. The payload is deliberately short enough that Node 24
+    // quotes it verbatim -- with a longer one V8 elides the sentinel and this test would pass on
+    // the leaking implementation too.
+    const path = write('{ "SECRETXYZ": oops');
     let message = '';
     try {
       loadFacebookMarkets(path);
@@ -115,7 +117,7 @@ describe('runtime market map', () => {
       message = (error as Error).message;
     }
     expect(message).toContain('is not valid JSON');
-    expect(message).not.toContain('MARKER_VALUE');
+    expect(message).not.toContain('SECRETXYZ');
   });
 
   it('rejects a path that is not a regular file', () => {
