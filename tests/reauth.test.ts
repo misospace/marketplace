@@ -473,6 +473,38 @@ it('waits for a complete Xvfb display-number line across chunk boundaries', asyn
   await expect(parseDisplayNumber(chunks(), 200)).resolves.toBe(19);
 });
 
+it('logs a safe startup stage and error code without raw error details', async () => {
+  const browser = makeManager();
+  const runtime = makeRuntime();
+  const errors: string[] = [];
+  const failure = Object.assign(new Error('sensitive subprocess output'), { code: 'EROFS' });
+  runtime.startDisplay = async () => { throw failure; };
+  const reauth = makeReauth(browser, runtime, {
+    logger: { error: (message) => errors.push(String(message)), info: () => undefined }
+  });
+
+  await expect(reauth.start()).rejects.toBe(failure);
+  expect(reauth.status()).toMatchObject({ phase: 'idle', lease: null });
+  expect(errors.join('\n')).toContain('stage xvfb; code EROFS');
+  expect(errors.join('\n')).not.toContain('sensitive subprocess output');
+});
+
+it('identifies Chromium startup failures without logging raw error details', async () => {
+  const browser = makeManager();
+  const runtime = makeRuntime();
+  const errors: string[] = [];
+  const failure = Object.assign(new Error('sensitive browser launch output'), { code: 'EACCES' });
+  browser.openInteractive = async () => { throw failure; };
+  const reauth = makeReauth(browser, runtime, {
+    logger: { error: (message) => errors.push(String(message)), info: () => undefined }
+  });
+
+  await expect(reauth.start()).rejects.toBe(failure);
+  expect(reauth.status()).toMatchObject({ phase: 'idle', lease: null });
+  expect(errors.join('\n')).toContain('stage chromium; code EACCES');
+  expect(errors.join('\n')).not.toContain('sensitive browser launch output');
+});
+
 it('validates Facebook or loopback origins only', () => {
   expect(assertFacebookOrigin('https://www.facebook.com/marketplace/')).toBe('https://www.facebook.com/marketplace/');
   expect(assertFacebookOrigin('http://127.0.0.1:3000/test')).toBe('http://127.0.0.1:3000/test');
