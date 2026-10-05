@@ -114,7 +114,7 @@ describe('browser launch args', () => {
     expect(launchCount).toBe(0);
   });
 
-  it('passes only defined proxy variables into interactive Chromium', async () => {
+  it('enables WebGL and passes only defined proxy variables into interactive Chromium', async () => {
     const keys = ['HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy'] as const;
     const previous = new Map(keys.map((key) => [key, process.env[key]]));
     keys.forEach((key) => { delete process.env[key]; });
@@ -122,11 +122,13 @@ describe('browser launch args', () => {
     process.env.http_proxy = 'http://lower-proxy.example:8080';
     process.env.NO_PROXY = 'localhost';
     let launchEnvironment: NodeJS.ProcessEnv | undefined;
+    let launchArgs: string[] | undefined;
     const manager = new class extends BrowserManager {
       loadPlaywright(): Promise<typeof import('playwright')> {
         return Promise.resolve({
           chromium: {
-            launchPersistentContext: async (_profileDir: string, options: { env?: NodeJS.ProcessEnv }) => {
+            launchPersistentContext: async (_profileDir: string, options: { args?: string[]; env?: NodeJS.ProcessEnv }) => {
+              launchArgs = options.args;
               launchEnvironment = options.env;
               return { close: async () => undefined, once: () => undefined };
             }
@@ -138,6 +140,7 @@ describe('browser launch args', () => {
     try {
       await manager.beginInteractive();
       await manager.openInteractive({ display: ':7' });
+      expect(launchArgs).toContain('--enable-webgl');
       expect(launchEnvironment).toMatchObject({
         DISPLAY: ':7',
         HTTP_PROXY: 'http://upper-proxy.example:8080',
