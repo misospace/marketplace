@@ -3,8 +3,8 @@ import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { chromium } from 'playwright';
-import { BrowserSessionManager, type BrowserSessionOptions } from '../src/browser.js';
+import { chromium, type Page } from 'playwright';
+import { BrowserSessionManager } from '../src/browser.js';
 import { FacebookSessionProbe } from '../src/facebook.js';
 import {
   FACEBOOK_LOGIN_WAIT_DEFAULT_MS,
@@ -38,13 +38,21 @@ const APPROVAL_DELAY_MS = 400;
 const POLL_INTERVAL_MS = 100;
 const TEST_WAIT_MS = 3_000;
 
-type LoginMode = 'authenticated' | 'login-required' | 'approve-after-submit' | 'never-approves' | 'captcha-after-submit' | 'checkpoint-after-submit';
+type LoginMode =
+  | 'authenticated'
+  | 'login-required'
+  | 'approve-after-submit'
+  | 'never-approves'
+  | 'captcha-after-submit'
+  | 'checkpoint-after-submit'
+  /** Serves a login form with no email field, forcing the fill step to time out. */
+  | 'missing-email';
 
 interface SyntheticLoginServer {
   server: Server;
   origin: string;
   requests: string[];
-  /** Raw request URLs of every form submission, in order. */
+  /** Raw request bodies of every form submission, in order. */
   submissions: string[];
   setMode(mode: LoginMode): void;
   close(): Promise<void>;
@@ -78,19 +86,79 @@ describe('facebookCredentialsFromEnv', () => {
 
   itWithTimeout('defaults the wait window to three minutes and validates options', () => {
     expect(FACEBOOK_LOGIN_WAIT_DEFAULT_MS).toBe(180_000);
-    const manager = new BrowserSessionManager({ profileDir: mkdtempSync(join(tmpdir(), 'marketplace-login-ctor-')), logger: { error: () => undefined } });
+    const manager = createManager();
     expect(() => new FacebookCredentialLogin({ browser: manager, username: '', password: 'x' })).toThrow(TypeError);
     expect(() => new FacebookCredentialLogin({ browser: manager, username: 'x', password: '' })).toThrow(TypeError);
     expect(() => new FacebookCredentialLogin({ browser: manager, username: 'x', password: 'y', waitMs: 0 })).toThrow(RangeError);
     expect(() => new FacebookCredentialLogin({ browser: manager, username: 'x', password: 'y', baseUrl: 'https://evil.example' })).toThrow(TypeError);
-    void manager.close();
+  });
+
+  itWithTimeout('does not expose the credentials when the login object is serialized', () => {
+    const login = new FacebookCredentialLogin({
+      browser: createManager(),
+      username: USERNAME_SENTINEL,
+      password: PASSWORD_SENTINEL
+    });
+
+    const serialized = JSON.stringify(login);
+    expect(serialized).not.toContain(USERNAME_SENTINEL);
+    expect(serialized).not.toContain(PASSWORD_SENTINEL);
+  });
+});
+
+/**
+ * A browser manager that hands the task a scripted page instead of launching Chromium, so a
+ * submission failure can be reproduced exactly -- including one whose message quotes the typed
+ * value, which is the only realistic route for a credential to reach a surface.
+ */
+class ScriptedPageBrowser extends BrowserSessionManager {
+  constructor(private readonly scriptedPage: Page) {
+    super({ profileDir: mkdtempSync(join(tmpdir(), 'marketplace-login-scripted-')), logger: { error: () => undefined } });
+  }
+
+  override runExclusive<T>(signal: AbortSignal, task: (page: Page, signal: AbortSignal) => Promise<T>): Promise<T> {
+    return task(this.scriptedPage, signal);
+  }
+}
+
+describe('Facebook credential login submission failures', () => {
+  itWithTimeout('sanitizes a fill failure whose message quotes the typed value', async () => {
+    // Playwright's pressSequentially timeout message echoes the text it was typing, which is the
+    // concrete way a credential could escape. Nothing else in this suite can produce that message,
+    // so this is the test that actually pins the redaction.
+    const leaking = `locator.pressSequentially: Timeout 1000ms exceeded. Call log: elementHandle.type("${USERNAME_SENTINEL}")`;
+    const scriptedPage = {
+      goto: async () => undefined,
+      getByRole: () => ({ first: () => ({ click: async () => { throw new Error('no consent banner'); } }) }),
+      locator: () => ({
+        waitFor: async () => undefined,
+        pressSequentially: async () => { throw new Error(leaking); }
+      }),
+      keyboard: { press: async () => undefined }
+    } as unknown as Page;
+
+    const logged: string[] = [];
+    const login = new FacebookCredentialLogin({
+      browser: new ScriptedPageBrowser(scriptedPage),
+      username: USERNAME_SENTINEL,
+      password: PASSWORD_SENTINEL,
+      logger: { error: (...args: unknown[]) => { logged.push(args.map((value) => String(value)).join(' ')); } }
+    });
+
+    const failure = await login.attempt(new AbortController().signal)
+      .then(() => undefined, (error: unknown) => error as ProviderError);
+
+    expect(failure).toBeInstanceOf(ProviderError);
+    expect(failure?.code).toBe('LOGIN_REQUIRED');
+    const surfaces = [failure?.message ?? '', ...logged].join('\n');
+    expect(surfaces).not.toContain(USERNAME_SENTINEL);
+    expect(surfaces).not.toContain(PASSWORD_SENTINEL);
   });
 });
 
 describe.skipIf(!browserAvailable)('Facebook credential login', () => {
   itWithTimeout('skips the credential login entirely when the profile is already authenticated', async () => {
     const { manager, login, server } = await harness('authenticated');
-    server.setMode('authenticated');
 
     const probe = new FacebookSessionProbe({ browser: manager, baseUrl: server.origin, navigationTimeoutMs: 2_000, settleTimeoutMs: 150 });
     await expect(probe.probeSession(new AbortController().signal)).resolves.toMatchObject({ status: 'session_usable' });
@@ -112,9 +180,9 @@ describe.skipIf(!browserAvailable)('Facebook credential login', () => {
     const result = await login.attempt(new AbortController().signal);
 
     expect(server.submissions).toHaveLength(1);
-    const submitted = new URL(server.submissions[0]!, server.origin);
-    expect(submitted.searchParams.get('email')).toBe(USERNAME_SENTINEL);
-    expect(submitted.searchParams.get('pass')).toBe(PASSWORD_SENTINEL);
+    const submitted = new URLSearchParams(server.submissions[0]!);
+    expect(submitted.get('email')).toBe(USERNAME_SENTINEL);
+    expect(submitted.get('pass')).toBe(PASSWORD_SENTINEL);
     // The approval never arrives, so the attempt must fail closed rather than report success.
     expect(result).toEqual({ outcome: 'timeout', code: 'LOGIN_REQUIRED' });
     expect(manager.getInfo().status).toBe('session_unknown');
@@ -140,6 +208,18 @@ describe.skipIf(!browserAvailable)('Facebook credential login', () => {
     expect(manager.getInfo().status).not.toBe('session_usable');
   });
 
+  itWithTimeout('fails closed when the attempt is aborted mid-wait', async () => {
+    const { manager, login } = await harness('never-approves');
+
+    const controller = new AbortController();
+    const attempt = login.attempt(controller.signal);
+    await new Promise<void>((resolve) => setTimeout(resolve, 300));
+    controller.abort();
+
+    await expect(attempt).rejects.toBeDefined();
+    expect(manager.getInfo().status).not.toBe('session_usable');
+  });
+
   itWithTimeout('hands a captcha back to manual re-auth instead of resubmitting credentials', async () => {
     const { manager, login, server } = await harness('captcha-after-submit');
 
@@ -159,6 +239,26 @@ describe.skipIf(!browserAvailable)('Facebook credential login', () => {
     expect(result).toEqual({ outcome: 'challenge', code: 'SESSION_INVALID' });
     expect(server.submissions).toHaveLength(1);
     expect(manager.getInfo().status).toBe('session_needs_reauth');
+  });
+
+  itWithTimeout('does not leak the credentials when the login form cannot be filled', async () => {
+    const logged: string[] = [];
+    const { manager, login } = await harness('missing-email', {
+      error: (...args: unknown[]) => { logged.push(args.map((value) => String(value)).join(' ')); }
+    });
+
+    // No email field ever appears, so the fill step times out and the catch block runs. This covers
+    // the realistic shape of a fill failure failing closed; the redaction itself is pinned by the
+    // scripted-page test, the only one that can produce a message quoting the typed value.
+    const failure = await login.attempt(new AbortController().signal)
+      .then(() => undefined, (error: unknown) => error as ProviderError);
+
+    expect(failure).toBeInstanceOf(ProviderError);
+    expect(failure?.code).toBe('LOGIN_REQUIRED');
+    const surfaces = [failure?.message ?? '', ...logged].join('\n');
+    expect(surfaces).not.toContain(USERNAME_SENTINEL);
+    expect(surfaces).not.toContain(PASSWORD_SENTINEL);
+    expect(manager.getInfo().status).not.toBe('session_usable');
   });
 
   itWithTimeout('never puts the credentials in a log, an error, or a result', async () => {
@@ -181,12 +281,7 @@ describe.skipIf(!browserAvailable)('Facebook credential login', () => {
   });
 });
 
-async function harness(
-  mode: LoginMode,
-  logger: Pick<Console, 'error'> = { error: () => undefined }
-): Promise<{ manager: BrowserSessionManager; login: FacebookCredentialLogin; server: SyntheticLoginServer }> {
-  const server = await startLoginServer();
-  servers.push(server);
+function createManager(): BrowserSessionManager {
   const parent = mkdtempSync(join(tmpdir(), 'marketplace-login-test-'));
   profileDirs.push(parent);
   const manager = new BrowserSessionManager({
@@ -194,6 +289,16 @@ async function harness(
     logger: { error: () => undefined }
   });
   managers.push(manager);
+  return manager;
+}
+
+async function harness(
+  mode: LoginMode,
+  logger: Pick<Console, 'error'> = { error: () => undefined }
+): Promise<{ manager: BrowserSessionManager; login: FacebookCredentialLogin; server: SyntheticLoginServer }> {
+  const server = await startLoginServer();
+  servers.push(server);
+  const manager = createManager();
   server.setMode(mode);
   const login = new FacebookCredentialLogin({
     browser: manager,
@@ -223,31 +328,36 @@ async function startLoginServer(): Promise<SyntheticLoginServer> {
     }
 
     if (url.pathname === '/login/submit/') {
-      submissions.push(request.url ?? '');
-      const redirect = (location: string): void => {
-        response.writeHead(302, { location });
-        response.end();
-      };
-      if (mode === 'approve-after-submit') {
-        // Hold the navigation briefly, standing in for the operator approving on their phone.
-        setTimeout(() => redirect('/marketplace/'), APPROVAL_DELAY_MS);
-        return;
-      }
-      if (mode === 'captcha-after-submit') {
-        redirect('/captcha/');
-        return;
-      }
-      if (mode === 'checkpoint-after-submit') {
-        redirect('/checkpoint/');
-        return;
-      }
-      redirect(LOGIN_PATH);
+      // The real form posts; collecting the body keeps the credentials out of the request URL.
+      const chunks: Buffer[] = [];
+      request.on('data', (chunk: Buffer) => chunks.push(chunk));
+      request.on('end', () => {
+        submissions.push(Buffer.concat(chunks).toString('utf8'));
+        const redirect = (location: string): void => {
+          response.writeHead(302, { location });
+          response.end();
+        };
+        if (mode === 'approve-after-submit') {
+          // Hold the navigation briefly, standing in for the operator approving on their phone.
+          setTimeout(() => redirect('/marketplace/'), APPROVAL_DELAY_MS);
+          return;
+        }
+        if (mode === 'captcha-after-submit') {
+          redirect('/captcha/');
+          return;
+        }
+        if (mode === 'checkpoint-after-submit') {
+          redirect('/checkpoint/');
+          return;
+        }
+        redirect(LOGIN_PATH);
+      });
       return;
     }
 
     response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
     if (url.pathname === LOGIN_PATH) {
-      response.end(loginFormPage());
+      response.end(mode === 'missing-email' ? loginFormWithoutEmailPage() : loginFormPage());
       return;
     }
     if (url.pathname === '/captcha/') {
@@ -286,11 +396,21 @@ async function startLoginServer(): Promise<SyntheticLoginServer> {
 
 function loginFormPage(): string {
   return [
-    '<!doctype html><html><body><form action="/login/submit/" method="get">',
+    '<!doctype html><html><body><form action="/login/submit/" method="post">',
     '<input type="text" name="email" aria-label="Email address">',
     '<input type="password" name="pass" aria-label="Password">',
     // Facebook no longer renders a button named "login", but Enter only submits a form that has a
     // submit control, so the fixture keeps one.
+    '<button type="submit">Log in</button>',
+    '</form></body></html>'
+  ].join('');
+}
+
+/** A password field with no email field: the fill step cannot complete. */
+function loginFormWithoutEmailPage(): string {
+  return [
+    '<!doctype html><html><body><form action="/login/submit/" method="post">',
+    '<input type="password" name="pass" aria-label="Password">',
     '<button type="submit">Log in</button>',
     '</form></body></html>'
   ].join('');

@@ -28,9 +28,6 @@ const REAUTH_ADMIN_PORT = parseConfiguredPort(process.env.REAUTH_ADMIN_PORT, 'RE
 const REAUTH_VIEWER_PORT = parseConfiguredPort(process.env.REAUTH_VIEWER_PORT, 'REAUTH_VIEWER_PORT', 6080);
 const REAUTH_LEASE_MS = parseReauthLease(process.env.REAUTH_LEASE_MS);
 const MARKETPLACE_BACKEND = parseBackendKind(process.env.MARKETPLACE_BACKEND);
-// Optional and env-only. A half-configured pair fails here, at startup, rather than silently
-// never attempting a login.
-const FACEBOOK_CREDENTIALS = facebookCredentialsFromEnv(process.env);
 const FACEBOOK_LOGIN_WAIT_MS = parseLoginWaitMs(process.env.FACEBOOK_LOGIN_WAIT_SECONDS);
 
 export interface ServiceOptions {
@@ -93,7 +90,9 @@ export function createMarketplaceService(options: ServiceOptions = {}): Marketpl
     ...(options.facebookBaseUrl !== undefined ? { baseUrl: options.facebookBaseUrl } : {}),
     logger
   });
-  const credentials = options.facebookCredentials ?? FACEBOOK_CREDENTIALS;
+  // Read here rather than at module load: a half-configured pair must fail service startup
+  // loudly, without making the module itself unimportable.
+  const credentials = options.facebookCredentials ?? facebookCredentialsFromEnv(process.env);
   const login = credentials === undefined
     ? undefined
     : new FacebookCredentialLogin({

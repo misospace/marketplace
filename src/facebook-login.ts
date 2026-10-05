@@ -60,6 +60,12 @@ export interface FacebookCredentials {
 }
 
 /**
+ * Credentials live here rather than on the instance so that serializing a login object -- in a
+ * debug log, an error mapper, or a future serializer -- cannot surface them.
+ */
+const credentialStore = new WeakMap<FacebookCredentialLogin, FacebookCredentials>();
+
+/**
  * Reads optional credentials from the environment. Credentials are env-only: they are never
  * persisted, returned, or logged by this service.
  *
@@ -88,8 +94,6 @@ export class FacebookCredentialLogin {
   readonly baseUrl: string;
   readonly loginUrl: string;
   private readonly browser: BrowserSessionManager;
-  private readonly username: string;
-  private readonly password: string;
   private readonly waitMs: number;
   private readonly pollIntervalMs: number;
   private readonly navigationTimeoutMs: number;
@@ -112,8 +116,8 @@ export class FacebookCredentialLogin {
     this.browser = options.browser;
     this.baseUrl = normalizeFacebookBaseUrl(options.baseUrl ?? FACEBOOK_ORIGIN);
     this.loginUrl = new URL(options.loginPath ?? FACEBOOK_LOGIN_PATH, this.baseUrl).href;
-    this.username = options.username;
-    this.password = options.password;
+    // Held off-instance so serializing the login object cannot expose the credentials.
+    credentialStore.set(this, { username: options.username, password: options.password });
     this.waitMs = options.waitMs ?? FACEBOOK_LOGIN_WAIT_DEFAULT_MS;
     this.pollIntervalMs = options.pollIntervalMs ?? FACEBOOK_LOGIN_POLL_DEFAULT_MS;
     this.navigationTimeoutMs = options.navigationTimeoutMs ?? 15_000;
@@ -122,6 +126,12 @@ export class FacebookCredentialLogin {
     validateTimeout(this.waitMs, 'waitMs');
     validateTimeout(this.pollIntervalMs, 'pollIntervalMs');
     validateTimeout(this.navigationTimeoutMs, 'navigationTimeoutMs');
+  }
+
+  private get credentials(): FacebookCredentials {
+    const stored = credentialStore.get(this);
+    if (stored === undefined) throw new Error('Facebook credentials are not available');
+    return stored;
   }
 
   async attempt(signal: AbortSignal): Promise<FacebookLoginResult> {
@@ -144,16 +154,17 @@ export class FacebookCredentialLogin {
   }
 
   private async submitCredentials(page: Page, signal: AbortSignal): Promise<void> {
+    const { username, password } = this.credentials;
     try {
       const email = page.locator(EMAIL_SELECTOR);
       await email.waitFor({ state: 'visible', timeout: this.navigationTimeoutMs });
       if (signal.aborted) throw signal.reason ?? new Error('Browser operation aborted');
-      await email.pressSequentially(this.username, { delay: TYPING_DELAY_MS });
+      await email.pressSequentially(username, { delay: TYPING_DELAY_MS });
 
-      const password = page.locator(PASSWORD_SELECTOR);
-      await password.waitFor({ state: 'visible', timeout: this.navigationTimeoutMs });
+      const passwordField = page.locator(PASSWORD_SELECTOR);
+      await passwordField.waitFor({ state: 'visible', timeout: this.navigationTimeoutMs });
       if (signal.aborted) throw signal.reason ?? new Error('Browser operation aborted');
-      await password.pressSequentially(this.password, { delay: TYPING_DELAY_MS });
+      await passwordField.pressSequentially(password, { delay: TYPING_DELAY_MS });
 
       if (signal.aborted) throw signal.reason ?? new Error('Browser operation aborted');
       // Facebook removed the login button, so the form is submitted by pressing Enter.
