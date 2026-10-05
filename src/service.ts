@@ -8,6 +8,12 @@ import type { FacebookMarket } from './facebook-marketplace-url.js';
 import { backendNameSchema, SERVICE_VERSION } from './domain.js';
 import { BrowserSessionManager } from './browser.js';
 import { FacebookSessionProbe, toProviderSessionAssessment } from './facebook.js';
+import {
+  FACEBOOK_LOGIN_WAIT_DEFAULT_MS,
+  FacebookCredentialLogin,
+  facebookCredentialsFromEnv,
+  type FacebookCredentials
+} from './facebook-login.js';
 import { registerMarketplaceTools } from './tools.js';
 import { ReauthManager, ProcessReauthRuntime, REAUTH_LEASE_DEFAULT_MS, REAUTH_LEASE_MAX_MS, type ReauthRuntime } from './reauth.js';
 import { createReauthAdminServer, type ReauthAdminServer } from './admin.js';
@@ -22,6 +28,10 @@ const REAUTH_ADMIN_PORT = parseConfiguredPort(process.env.REAUTH_ADMIN_PORT, 'RE
 const REAUTH_VIEWER_PORT = parseConfiguredPort(process.env.REAUTH_VIEWER_PORT, 'REAUTH_VIEWER_PORT', 6080);
 const REAUTH_LEASE_MS = parseReauthLease(process.env.REAUTH_LEASE_MS);
 const MARKETPLACE_BACKEND = parseBackendKind(process.env.MARKETPLACE_BACKEND);
+// Optional and env-only. A half-configured pair fails here, at startup, rather than silently
+// never attempting a login.
+const FACEBOOK_CREDENTIALS = facebookCredentialsFromEnv(process.env);
+const FACEBOOK_LOGIN_WAIT_MS = parseLoginWaitMs(process.env.FACEBOOK_LOGIN_WAIT_SECONDS);
 
 export interface ServiceOptions {
   backend?: MarketplaceBackend;
@@ -42,6 +52,9 @@ export interface ServiceOptions {
   reauthRuntime?: ReauthRuntime;
   /** Internal dependency/test seam; not an environment variable or tool input. */
   facebookBaseUrl?: string;
+  /** Internal dependency/test seam; not an environment variable or tool input. */
+  facebookCredentials?: FacebookCredentials;
+  facebookLoginWaitMs?: number;
 }
 
 export interface MarketplaceService {
@@ -80,10 +93,22 @@ export function createMarketplaceService(options: ServiceOptions = {}): Marketpl
     ...(options.facebookBaseUrl !== undefined ? { baseUrl: options.facebookBaseUrl } : {}),
     logger
   });
+  const credentials = options.facebookCredentials ?? FACEBOOK_CREDENTIALS;
+  const login = credentials === undefined
+    ? undefined
+    : new FacebookCredentialLogin({
+      browser,
+      username: credentials.username,
+      password: credentials.password,
+      ...(options.facebookBaseUrl !== undefined ? { baseUrl: options.facebookBaseUrl } : {}),
+      waitMs: options.facebookLoginWaitMs ?? FACEBOOK_LOGIN_WAIT_MS,
+      logger
+    });
   const backend = options.backend ?? ((options.backendKind ?? MARKETPLACE_BACKEND) === 'facebook'
     ? new FacebookMarketplaceBackend({
       browser,
       probe: facebook,
+      ...(login !== undefined ? { login } : {}),
       ...(options.facebookMarkets !== undefined ? { markets: options.facebookMarkets } : {}),
       logger
     })
@@ -289,6 +314,16 @@ export function parseBackendTimeout(value: string | undefined): number {
     throw new RangeError('BACKEND_TIMEOUT_MS must be a positive integer below 60000');
   }
   return timeout;
+}
+
+export function parseLoginWaitMs(value: string | undefined): number {
+  if (value === undefined) return FACEBOOK_LOGIN_WAIT_DEFAULT_MS;
+  if (!/^\d+$/.test(value)) throw new RangeError('FACEBOOK_LOGIN_WAIT_SECONDS must be a positive integer');
+  const seconds = Number(value);
+  if (!Number.isSafeInteger(seconds) || seconds <= 0) {
+    throw new RangeError('FACEBOOK_LOGIN_WAIT_SECONDS must be a positive integer');
+  }
+  return seconds * 1_000;
 }
 
 function parsePort(value: string | undefined): number {

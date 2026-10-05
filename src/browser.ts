@@ -622,6 +622,30 @@ function resolveProfileDir(configured: string | undefined): string {
   return resolve(configured ?? join(homedir(), '.marketplace', 'browser-profile'));
 }
 
+/**
+ * Abort-aware sleep. Resolves early when the signal fires so a cancelled caller is not held for
+ * the remainder of the delay.
+ */
+export function sleepUntilAbort(milliseconds: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal.aborted) {
+      resolve();
+      return;
+    }
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, milliseconds);
+    signal.addEventListener('abort', onAbort, { once: true });
+    if (signal.aborted) onAbort();
+  });
+}
+
 function safeErrorMessage(error: unknown): string {
   if (error instanceof Error) {
     const name = error.name.replace(/[\r\n]/g, ' ');
