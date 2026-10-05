@@ -260,6 +260,7 @@ export class BrowserSessionManager {
         timeout: this.launchTimeoutMs,
         args: [
           ...this.launchArgs,
+          '--enable-webgl',
           '--disable-background-networking',
           '--disable-component-update',
           '--disable-sync',
