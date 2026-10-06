@@ -20,7 +20,7 @@ import {
   type FacebookMarket
 } from './facebook-marketplace-url.js';
 import { assertFacebookOrigin, FacebookSessionProbe, type FacebookProbeCode } from './facebook.js';
-import { FacebookCredentialLogin, type FacebookLoginResult } from './facebook-login.js';
+import { FacebookCredentialLogin } from './facebook-login.js';
 
 export interface FacebookMarketplaceBackendOptions {
   browser: BrowserSessionManager;
