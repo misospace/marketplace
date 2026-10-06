@@ -106,6 +106,10 @@ describe('Marketplace price parsing', () => {
     expect(parseMarketplacePrice('$99', 'CAD').currency).toBe('CAD');
     expect(parseMarketplacePrice('$99', 'EUR').currency).toBe('USD');
   });
+
+  it('leaves the currency empty for a markerless number without market context', () => {
+    expect(parseMarketplacePrice('500', '')).toEqual({ status: 'absent', price: null, currency: '' });
+  });
 });
 
 describe('Marketplace page classification', () => {
@@ -271,12 +275,12 @@ function itemPage(overrides: Partial<ExtractedMarketplaceItem> = {}): ExtractedM
   };
 }
 
-function itemInput(pageValue: ExtractedMarketplaceItem = itemPage()) {
+function itemInput(pageValue: ExtractedMarketplaceItem = itemPage(), fallbackCurrency: string | null = 'USD') {
   return {
     page: pageValue,
     id: '1234567890',
     url: 'https://www.facebook.com/marketplace/item/1234567890/',
-    fallbackCurrency: 'USD'
+    ...(fallbackCurrency !== null ? { fallbackCurrency } : {})
   };
 }
 
@@ -292,10 +296,21 @@ describe('Marketplace item parsing', () => {
     expect(interpretMarketplaceItem(itemInput(pageValue))).toMatchObject({ kind: 'error', code });
   });
 
+  it('classifies checkpoint before login when both signals are present', () => {
+    const pageValue = itemPage({ signals: { ...cleanSignals, hasLoginForm: true, hasCheckpoint: true } });
+    expect(classifyMarketplaceItem(pageValue)).toBe('checkpoint');
+    expect(interpretMarketplaceItem(itemInput(pageValue))).toMatchObject({ kind: 'error', code: 'SESSION_INVALID' });
+  });
+
   it('classifies a title-less page with an unavailable notice as unavailable', () => {
     const pageValue = itemPage({ title: null, hasUnavailableNotice: true });
     expect(classifyMarketplaceItem(pageValue)).toBe('unavailable');
     expect(interpretMarketplaceItem(itemInput(pageValue))).toEqual({ kind: 'unavailable' });
+  });
+
+  it('returns a complete removed listing with its removed state', () => {
+    const outcome = interpretMarketplaceItem(itemInput(itemPage({ stateText: 'Vintage bicycle\n$450\nRemoved' })));
+    expect(outcome).toMatchObject({ kind: 'listing', listing: { title: 'Vintage bicycle', price: 450, location: 'Brooklyn, NY', state: 'removed' } });
   });
 
   it('keeps a rendered listing even when its description mentions unavailability', () => {
@@ -320,6 +335,15 @@ describe('Marketplace item parsing', () => {
     expect(JSON.stringify(outcome)).not.toContain('attacker.example');
   });
 
+  it('fails closed on currency when the price has no marker and the location resolves to no market', () => {
+    // The location is present and parseable, so this can only fail on the currency rule; asserting
+    // the message keeps it from silently passing via the location check instead.
+    const pageValue = itemPage({ priceText: '500', locationText: 'Unmapped Town, ZZ' });
+    const outcome = interpretMarketplaceItem({ ...itemInput(pageValue), fallbackCurrency: undefined });
+    expect(outcome).toMatchObject({ kind: 'error', code: 'UPSTREAM_ERROR' });
+    expect(JSON.stringify(outcome)).toContain('currency');
+  });
+
   it('fails closed for an unknown layout', () => {
     const pageValue = itemPage({ title: null });
     expect(classifyMarketplaceItem(pageValue)).toBe('unknown');
@@ -331,18 +355,23 @@ describe('Marketplace item parsing', () => {
       .toMatchObject({ kind: 'error', code: 'UPSTREAM_ERROR' });
   });
 
-  it('parses a listing, applies domain validation, and uses fallback currency for absent price', () => {
+  it('parses a listing, applies domain validation, and uses location currency for an absent price', () => {
     const outcome = interpretMarketplaceItem(itemInput(itemPage({ priceText: null, imageUrls: [
       'https://images.example.invalid/one.jpg', 'https://images.example.invalid/two.jpg'
-    ], sellerHref: '/marketplace/profile/123/', sellerName: 'Sample Seller' })));
+    ], sellerHref: '/marketplace/profile/123/', sellerName: 'Sample Seller' }), 'CAD'));
     expect(outcome.kind).toBe('listing');
     if (outcome.kind !== 'listing') return;
     expect(outcome.listing).toMatchObject({
       price: null,
-      currency: 'USD',
+      currency: 'CAD',
       seller: { name: 'Sample Seller', url: 'https://www.facebook.com/marketplace/profile/123/' }
     });
     expect(listingSchema.parse(outcome.listing)).toEqual(outcome.listing);
+  });
+
+  it('fails closed when currency cannot be determined', () => {
+    expect(interpretMarketplaceItem(itemInput(itemPage({ priceText: null }), null)))
+      .toMatchObject({ kind: 'error', code: 'UPSTREAM_ERROR', message: 'The Facebook Marketplace item currency could not be determined.' });
   });
 
   it('uses active only for a rendered fetch item and sold when the item region says Sold', () => {

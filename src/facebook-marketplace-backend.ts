@@ -214,7 +214,7 @@ export class FacebookMarketplaceBackend implements MarketplaceBackend {
     }
     if (session.status === 'session_unknown') {
       // The frozen error contract has no "unverified" code; SESSION_INVALID points an operator at the re-auth console, and the message states plainly that verification failed.
-      throw new ProviderError('SESSION_INVALID', 'The Facebook session could not be verified, so the search was not attempted.');
+      throw new ProviderError('SESSION_INVALID', 'The Facebook session could not be verified, so the request was not attempted.');
     }
   }
 
@@ -334,13 +334,11 @@ export class FacebookMarketplaceBackend implements MarketplaceBackend {
     const locationMarket = extracted.locationText?.trim()
       ? resolveFacebookMarket(extracted.locationText, this.markets)
       : null;
-    // This is only a fallback when the page's price has no currency marker; normally the price text supplies currency.
-    const fallbackCurrency = locationMarket?.ok ? locationMarket.market.currency : this.markets[0]?.currency ?? 'USD';
     const outcome = interpretMarketplaceItem({
       page: extracted,
       id: resolved.id,
       url: resolved.url,
-      fallbackCurrency
+      ...(locationMarket?.ok ? { fallbackCurrency: locationMarket.market.currency } : {})
     });
     if (outcome.kind === 'error') throw new ProviderError(outcome.code, outcome.message);
     if (outcome.kind === 'unavailable') return null;

@@ -411,9 +411,9 @@ export const MARKETPLACE_ITEM_KINDS = ['item', 'unavailable', 'login', 'checkpoi
 export type MarketplaceItemKind = typeof MARKETPLACE_ITEM_KINDS[number];
 
 export function classifyMarketplaceItem(page: ExtractedMarketplaceItem): MarketplaceItemKind {
-  if (page.signals.hasLoginForm) return 'login';
   if (page.signals.hasCaptcha) return 'captcha';
   if (page.signals.hasCheckpoint) return 'checkpoint';
+  if (page.signals.hasLoginForm) return 'login';
   if (page.signals.hasRateLimitNotice) return 'rate_limited';
   // A rendered listing wins over the notice text. The notice regex runs over the whole page, and a
   // description is part of the page, so a seller writing "delivery is not available" must not turn
@@ -434,7 +434,7 @@ export interface ParseMarketplaceItemInput {
   page: ExtractedMarketplaceItem;
   id: string;
   url: string;
-  fallbackCurrency: string;
+  fallbackCurrency?: string;
 }
 
 export function interpretMarketplaceItem(input: ParseMarketplaceItemInput): MarketplaceItemOutcome {
@@ -447,7 +447,10 @@ export function interpretMarketplaceItem(input: ParseMarketplaceItemInput): Mark
   if (kind === 'unavailable') return { kind: 'unavailable' };
 
   const page = input.page;
-  const priceResult = parseMarketplacePrice(page.priceText ?? '', input.fallbackCurrency);
+  const priceResult = parseMarketplacePrice(page.priceText ?? '', input.fallbackCurrency ?? '');
+  const currency = (priceResult.currency || input.fallbackCurrency || '').toUpperCase().slice(0, 3);
+  // An arbitrary configured market must never stand in for an unknown currency.
+  if (!currency) return { kind: 'error', code: 'UPSTREAM_ERROR', message: 'The Facebook Marketplace item currency could not be determined.' };
   const sellerUrl = canonicalSellerUrl(page.sellerHref, input.url);
   const sellerName = page.sellerName?.trim();
   const seller = sellerUrl || sellerName
@@ -462,7 +465,7 @@ export function interpretMarketplaceItem(input: ParseMarketplaceItemInput): Mark
     url: input.url,
     title: (page.title ?? '').trim().slice(0, 256),
     price: priceResult.status === 'ok' ? priceResult.price : null,
-    currency: (priceResult.currency || input.fallbackCurrency).toUpperCase().slice(0, 3),
+    currency,
     location: location.slice(0, 256),
     posted_at: parsePostedAt(page.timeDateTime),
     updated_at: null,

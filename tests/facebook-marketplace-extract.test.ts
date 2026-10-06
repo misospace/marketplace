@@ -200,7 +200,7 @@ describe.skipIf(!browserAvailable)('Facebook Marketplace page extraction', () =>
   });
 
   it.each([
-    ['item-normal.html', { title: 'Vintage oak writing desk', priceText: '$180', locationText: 'Portland, OR', descriptionText: 'Solid wood desk with a smooth finish. Pickup near the park.', sellerName: 'Sample Seller', timeDateTime: '2026-09-14T10:30:00-07:00' }],
+    ['item-normal.html', { title: 'Vintage oak writing desk', priceText: 'US$180', locationText: 'Portland, OR', descriptionText: 'Solid wood desk with a smooth finish. Pickup near the park.', sellerName: 'Sample Seller', timeDateTime: '2026-09-14T10:30:00-07:00' }],
     ['item-sold.html', { title: 'Vintage oak writing desk' }],
     ['item-unavailable.html', { hasUnavailableNotice: true, title: null }],
     ['item-login.html', { signals: { hasLoginForm: true } }],

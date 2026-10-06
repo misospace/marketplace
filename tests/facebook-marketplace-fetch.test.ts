@@ -10,6 +10,7 @@ import { FacebookCredentialLogin } from '../src/facebook-login.js';
 import { FacebookMarketplaceBackend } from '../src/facebook-marketplace-backend.js';
 import { fetchInputSchema, listingSchema } from '../src/domain.js';
 import { startSyntheticServer, waitForRequest, type SyntheticServer } from './helpers/synthetic-facebook-server.js';
+import type { FacebookMarket } from '../src/facebook-marketplace-url.js';
 
 const browserAvailable = existsSync(chromium.executablePath());
 if (!browserAvailable && process.env.REQUIRE_BROWSER_TESTS === '1') {
@@ -35,7 +36,7 @@ afterEach(async () => {
   synthetic.requests.length = 0;
 });
 
-function createBackend(options: { navigationTimeoutMs?: number; settleTimeoutMs?: number } = {}): {
+function createBackend(options: { navigationTimeoutMs?: number; settleTimeoutMs?: number; markets?: readonly FacebookMarket[] } = {}): {
   backend: FacebookMarketplaceBackend;
   browser: BrowserSessionManager;
 } {
@@ -57,6 +58,7 @@ function createBackend(options: { navigationTimeoutMs?: number; settleTimeoutMs?
       probe,
       navigationTimeoutMs: options.navigationTimeoutMs ?? 5_000,
       settleTimeoutMs: options.settleTimeoutMs ?? 50,
+      ...(options.markets ? { markets: options.markets } : {}),
       logger: { error: () => undefined }
     })
   };
@@ -138,12 +140,66 @@ describe.skipIf(!browserAvailable)('Facebook Marketplace fetch', () => {
     expect(listingSchema.parse(listing).state).toBe('sold');
   });
 
-  it('returns null for a removed or unavailable item', async () => {
+  it('returns null for an unavailable shell that cannot satisfy the listing schema', async () => {
     synthetic.configure('results-normal.html', 'results-normal.html');
     synthetic.configureItem('item-unavailable.html');
     const { backend } = createBackend();
 
     await expect(backend.fetch(fetchInput({ id: itemId }), signal())).resolves.toBeNull();
+  });
+
+  it('returns a complete removed listing instead of treating it as not found', async () => {
+    synthetic.configure('results-normal.html', 'results-normal.html');
+    synthetic.configureItem('item-removed-complete.html');
+    const { backend } = createBackend();
+
+    const listing = await backend.fetch(fetchInput({ id: itemId }), signal());
+
+    expect(listing).toMatchObject({
+      id: itemId,
+      title: 'Vintage oak writing desk',
+      price: 180,
+      currency: 'USD',
+      location: 'Portland, OR',
+      state: 'removed'
+    });
+    expect(listingSchema.parse(listing)).toEqual(listing);
+  });
+
+  it('uses a marked USD price instead of the first configured CAD market', async () => {
+    synthetic.configure('results-normal.html', 'results-normal.html');
+    synthetic.configureItem('item-usd-marker.html');
+    const { backend } = createBackend({ markets: [
+      { slug: 'calgary', label: 'Calgary, AB', currency: 'CAD' }
+    ] });
+
+    const listing = await backend.fetch(fetchInput({ id: itemId }), signal());
+
+    expect(listing).toMatchObject({ price: 500, currency: 'USD', location: 'Seattle, WA' });
+  });
+
+  it('uses a resolved listing location currency when the price has no marker', async () => {
+    synthetic.configure('results-normal.html', 'results-normal.html');
+    synthetic.configureItem('item-markerless-calgary.html');
+    const { backend } = createBackend({ markets: [
+      { slug: 'calgary', label: 'Calgary, AB', currency: 'CAD' },
+      { slug: 'seattle', label: 'Seattle, WA', currency: 'USD' }
+    ] });
+
+    const listing = await backend.fetch(fetchInput({ id: itemId }), signal());
+
+    expect(listing).toMatchObject({ price: null, currency: 'CAD', location: 'Calgary, AB' });
+  });
+
+  it('fails closed when neither the price marker nor listing location determines currency', async () => {
+    synthetic.configure('results-normal.html', 'results-normal.html');
+    synthetic.configureItem('item-markerless-unknown-location.html');
+    const { backend } = createBackend({ markets: [
+      { slug: 'calgary', label: 'Calgary, AB', currency: 'CAD' },
+      { slug: 'seattle', label: 'Seattle, WA', currency: 'USD' }
+    ] });
+
+    await expectProviderError(backend.fetch(fetchInput({ id: itemId }), signal()), 'UPSTREAM_ERROR');
   });
 
   it.each([
