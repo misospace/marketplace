@@ -1,5 +1,9 @@
-import { listingSchema, type Listing } from './domain.js';
-import type { ExtractedListingCard, ExtractedMarketplacePage } from './facebook-marketplace-extract.js';
+import { listingSchema, type Listing, type ProviderErrorCode } from './domain.js';
+import type {
+  ExtractedListingCard,
+  ExtractedMarketplaceItem,
+  ExtractedMarketplacePage
+} from './facebook-marketplace-extract.js';
 import {
   buildMarketplaceItemUrl,
   parseMarketplaceItemId,
@@ -225,6 +229,9 @@ function canonicalSellerUrl(value: string | null, baseUrl: string): string | nul
   try {
     const url = new URL(value, baseUrl);
     if ((url.protocol !== 'http:' && url.protocol !== 'https:') || url.username || url.password) return null;
+    // A seller link must stay on the page's own origin, or a page could carry an off-origin
+    // /marketplace/profile-shaped link into the normalized listing.
+    if (url.origin !== new URL(baseUrl).origin) return null;
     url.search = '';
     url.hash = '';
     return url.href;
@@ -399,6 +406,85 @@ export type MarketplaceSearchOutcome =
   | { kind: 'listings'; listings: readonly Listing[]; stats: MarketplaceParseStats }
   | { kind: 'empty'; stats: MarketplaceParseStats }
   | { kind: 'error'; code: 'LOGIN_REQUIRED' | 'CAPTCHA_REQUIRED' | 'SESSION_INVALID' | 'RATE_LIMITED' | 'UPSTREAM_ERROR'; message: string };
+
+export const MARKETPLACE_ITEM_KINDS = ['item', 'unavailable', 'login', 'checkpoint', 'captcha', 'rate_limited', 'unknown'] as const;
+export type MarketplaceItemKind = typeof MARKETPLACE_ITEM_KINDS[number];
+
+export function classifyMarketplaceItem(page: ExtractedMarketplaceItem): MarketplaceItemKind {
+  if (page.signals.hasLoginForm) return 'login';
+  if (page.signals.hasCaptcha) return 'captcha';
+  if (page.signals.hasCheckpoint) return 'checkpoint';
+  if (page.signals.hasRateLimitNotice) return 'rate_limited';
+  // A rendered listing wins over the notice text. The notice regex runs over the whole page, and a
+  // description is part of the page, so a seller writing "delivery is not available" must not turn
+  // a live listing into a NOT_FOUND. The notice only disambiguates a title-less page between a
+  // removed listing and an unrecognised layout; a removed listing that still renders a title is
+  // caught by the scoped state scan instead.
+  if (page.title?.trim()) return 'item';
+  if (page.hasUnavailableNotice) return 'unavailable';
+  return 'unknown';
+}
+
+export type MarketplaceItemOutcome =
+  | { kind: 'listing'; listing: Listing }
+  | { kind: 'unavailable' }
+  | { kind: 'error'; code: ProviderErrorCode; message: string };
+
+export interface ParseMarketplaceItemInput {
+  page: ExtractedMarketplaceItem;
+  id: string;
+  url: string;
+  fallbackCurrency: string;
+}
+
+export function interpretMarketplaceItem(input: ParseMarketplaceItemInput): MarketplaceItemOutcome {
+  const kind = classifyMarketplaceItem(input.page);
+  if (kind === 'captcha') return { kind: 'error', code: 'CAPTCHA_REQUIRED', message: 'Facebook Marketplace requires a captcha challenge.' };
+  if (kind === 'checkpoint') return { kind: 'error', code: 'SESSION_INVALID', message: 'The Facebook session requires a security check.' };
+  if (kind === 'login') return { kind: 'error', code: 'LOGIN_REQUIRED', message: 'Facebook Marketplace requires login.' };
+  if (kind === 'rate_limited') return { kind: 'error', code: 'RATE_LIMITED', message: 'Facebook Marketplace temporarily limited this request.' };
+  if (kind === 'unknown') return { kind: 'error', code: 'UPSTREAM_ERROR', message: 'The Facebook Marketplace item page layout was not recognised.' };
+  if (kind === 'unavailable') return { kind: 'unavailable' };
+
+  const page = input.page;
+  const priceResult = parseMarketplacePrice(page.priceText ?? '', input.fallbackCurrency);
+  const sellerUrl = canonicalSellerUrl(page.sellerHref, input.url);
+  const sellerName = page.sellerName?.trim();
+  const seller = sellerUrl || sellerName
+    ? { ...(sellerName ? { name: sellerName.slice(0, 128) } : {}), ...(sellerUrl ? { url: sellerUrl } : {}) }
+    : null;
+  const location = page.locationText?.trim() ?? '';
+  if (!location) return { kind: 'error', code: 'UPSTREAM_ERROR', message: 'The Facebook Marketplace item location could not be parsed.' };
+
+  const state = extractItemState(page.stateText ?? '');
+  const candidate = {
+    id: input.id,
+    url: input.url,
+    title: (page.title ?? '').trim().slice(0, 256),
+    price: priceResult.status === 'ok' ? priceResult.price : null,
+    currency: (priceResult.currency || input.fallbackCurrency).toUpperCase().slice(0, 3),
+    location: location.slice(0, 256),
+    posted_at: parsePostedAt(page.timeDateTime),
+    updated_at: null,
+    description: (page.descriptionText ?? '').replace(/\bSee\s+(?:more|less)\b/gi, '').replace(/\s+/g, ' ').trim().slice(0, 280),
+    images: page.imageUrls.slice(0, 6),
+    seller,
+    state
+  };
+  const parsed = listingSchema.safeParse(candidate);
+  if (!parsed.success) return { kind: 'error', code: 'UPSTREAM_ERROR', message: 'The Facebook Marketplace item could not be parsed.' };
+  return { kind: 'listing', listing: parsed.data };
+}
+
+function extractItemState(text: string): Listing['state'] {
+  for (const line of text.split('\n')) {
+    const indicator = line.trim().replace(/^[\p{P}\s]+|[\p{P}\s]+$/gu, '').toLowerCase();
+    if (indicator === 'sold') return 'sold';
+    if (indicator === 'pending') return 'pending';
+    if (indicator === 'removed' || indicator === 'no longer available') return 'removed';
+  }
+  return 'active';
+}
 
 export function interpretMarketplacePage(input: ParseMarketplaceInput): MarketplaceSearchOutcome {
   const kind = classifyMarketplacePage(input.page);

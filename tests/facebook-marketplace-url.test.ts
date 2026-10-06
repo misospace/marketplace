@@ -7,6 +7,7 @@ import {
   normalizeLocationKey,
   parseMarketplaceItemId,
   resolveFacebookMarket,
+  resolveMarketplaceItemInput,
   type FacebookMarket
 } from '../src/facebook-marketplace-url.js';
 
@@ -110,5 +111,30 @@ describe('Marketplace item URLs', () => {
   it('builds a clean item URL and rejects an invalid id', () => {
     expect(buildMarketplaceItemUrl('https://www.facebook.com/', '123456')).toBe('https://www.facebook.com/marketplace/item/123456/');
     expect(() => buildMarketplaceItemUrl('https://www.facebook.com', 'abc')).toThrow(TypeError);
+  });
+
+  it('resolves a bare id to a canonical base-derived URL', () => {
+    expect(resolveMarketplaceItemInput({ id: '1234567890' }, 'https://www.facebook.com/'))
+      .toEqual({ id: '1234567890', url: 'https://www.facebook.com/marketplace/item/1234567890/' });
+  });
+
+  it.each([
+    ['https://www.facebook.com/marketplace/item/1234567890/?ref=share', 'https://www.facebook.com/', 'https://www.facebook.com/marketplace/item/1234567890/'],
+    ['http://127.0.0.1:4317/marketplace/item/1234567890?tracking=1', 'http://127.0.0.1:4317/', 'http://127.0.0.1:4317/marketplace/item/1234567890/']
+  ])('canonicalizes a same-origin item URL', (supplied, base, expected) => {
+    expect(resolveMarketplaceItemInput({ url: supplied }, base)).toEqual({ id: '1234567890', url: expected });
+  });
+
+  it.each([
+    [{ url: 'https://example.com/marketplace/item/1234567890/' }, 'https://www.facebook.com/'],
+    [{ url: 'http://127.0.0.1:4317/marketplace/item/1234567890/' }, 'https://www.facebook.com/'],
+    [{ url: 'http://127.0.0.1:4318/marketplace/item/1234567890/' }, 'http://127.0.0.1:4317/'],
+    [{ url: 'https://www.facebook.com/marketplace/search/?query=chair' }, 'https://www.facebook.com/'],
+    [{ id: 'abcde' }, 'https://www.facebook.com/'],
+    [{ id: '1234' }, 'https://www.facebook.com/'],
+    [{ id: '12345', url: 'https://www.facebook.com/marketplace/item/12345/' }, 'https://www.facebook.com/'],
+    [{}, 'https://www.facebook.com/']
+  ])('rejects an unsafe or incomplete item input', (input, base) => {
+    expect(resolveMarketplaceItemInput(input, base)).toBeNull();
   });
 });
