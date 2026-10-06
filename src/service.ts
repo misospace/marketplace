@@ -8,6 +8,12 @@ import type { FacebookMarket } from './facebook-marketplace-url.js';
 import { backendNameSchema, SERVICE_VERSION } from './domain.js';
 import { BrowserSessionManager } from './browser.js';
 import { FacebookSessionProbe, toProviderSessionAssessment } from './facebook.js';
+import {
+  FACEBOOK_LOGIN_WAIT_DEFAULT_MS,
+  FacebookCredentialLogin,
+  facebookCredentialsFromEnv,
+  type FacebookCredentials
+} from './facebook-login.js';
 import { registerMarketplaceTools } from './tools.js';
 import { ReauthManager, ProcessReauthRuntime, REAUTH_LEASE_DEFAULT_MS, REAUTH_LEASE_MAX_MS, type ReauthRuntime } from './reauth.js';
 import { createReauthAdminServer, type ReauthAdminServer } from './admin.js';
@@ -21,7 +27,6 @@ const BACKEND_TIMEOUT_MS = parseBackendTimeout(process.env.BACKEND_TIMEOUT_MS);
 const REAUTH_ADMIN_PORT = parseConfiguredPort(process.env.REAUTH_ADMIN_PORT, 'REAUTH_ADMIN_PORT', 8787);
 const REAUTH_VIEWER_PORT = parseConfiguredPort(process.env.REAUTH_VIEWER_PORT, 'REAUTH_VIEWER_PORT', 6080);
 const REAUTH_LEASE_MS = parseReauthLease(process.env.REAUTH_LEASE_MS);
-const MARKETPLACE_BACKEND = parseBackendKind(process.env.MARKETPLACE_BACKEND);
 
 export interface ServiceOptions {
   backend?: MarketplaceBackend;
@@ -42,6 +47,9 @@ export interface ServiceOptions {
   reauthRuntime?: ReauthRuntime;
   /** Internal dependency/test seam; not an environment variable or tool input. */
   facebookBaseUrl?: string;
+  /** Internal dependency/test seam; not an environment variable or tool input. */
+  facebookCredentials?: FacebookCredentials;
+  facebookLoginWaitMs?: number;
 }
 
 export interface MarketplaceService {
@@ -59,6 +67,15 @@ export interface MarketplaceService {
 export function createMarketplaceService(options: ServiceOptions = {}): MarketplaceService {
   if (options.backend !== undefined && options.backendKind === 'facebook') {
     throw new TypeError('backend and backendKind cannot both select a backend');
+  }
+  if (options.facebookCredentials !== undefined &&
+      (!options.facebookCredentials.username.trim() || !options.facebookCredentials.password.trim())) {
+    throw new TypeError('FACEBOOK_USERNAME and FACEBOOK_PASSWORD must be set together');
+  }
+  const selectedBackendKind = options.backendKind ?? parseBackendKind(process.env.MARKETPLACE_BACKEND);
+  const loginWaitMs = options.facebookLoginWaitMs ?? parseLoginWaitMs(process.env.FACEBOOK_LOGIN_WAIT_SECONDS);
+  if (!Number.isSafeInteger(loginWaitMs) || loginWaitMs <= 0) {
+    throw new RangeError('facebookLoginWaitMs must be a positive safe integer');
   }
   const host = options.host ?? HOST;
   const port = options.port ?? PORT;
@@ -80,10 +97,27 @@ export function createMarketplaceService(options: ServiceOptions = {}): Marketpl
     ...(options.facebookBaseUrl !== undefined ? { baseUrl: options.facebookBaseUrl } : {}),
     logger
   });
-  const backend = options.backend ?? ((options.backendKind ?? MARKETPLACE_BACKEND) === 'facebook'
+  // Read here rather than at module load, and only when the Facebook backend can actually use it:
+  // a fixture service has no business touching the secret, and must not fail on a half-configured
+  // pair. A half-configured pair still fails loudly once the Facebook backend is selected.
+  const credentials = selectedBackendKind === 'facebook' && options.backend === undefined
+    ? (options.facebookCredentials ?? facebookCredentialsFromEnv(process.env))
+    : undefined;
+  const login = credentials === undefined
+    ? undefined
+    : new FacebookCredentialLogin({
+      browser,
+      username: credentials.username,
+      password: credentials.password,
+      ...(options.facebookBaseUrl !== undefined ? { baseUrl: options.facebookBaseUrl } : {}),
+      waitMs: loginWaitMs,
+      logger
+    });
+  const backend = options.backend ?? (selectedBackendKind === 'facebook'
     ? new FacebookMarketplaceBackend({
       browser,
       probe: facebook,
+      ...(login !== undefined ? { login } : {}),
       ...(options.facebookMarkets !== undefined ? { markets: options.facebookMarkets } : {}),
       logger
     })
@@ -232,6 +266,7 @@ export function createMarketplaceService(options: ServiceOptions = {}): Marketpl
     shuttingDown = true;
     shutdownController.abort(new Error('Service shutting down'));
     closePromise = (async () => {
+      if (backend instanceof FacebookMarketplaceBackend) await backend.close();
       await stopReauthBounded(reauth, logger);
       await admin.close().catch((error: unknown) => {
         try {
@@ -289,6 +324,16 @@ export function parseBackendTimeout(value: string | undefined): number {
     throw new RangeError('BACKEND_TIMEOUT_MS must be a positive integer below 60000');
   }
   return timeout;
+}
+
+export function parseLoginWaitMs(value: string | undefined): number {
+  if (value === undefined) return FACEBOOK_LOGIN_WAIT_DEFAULT_MS;
+  if (!/^\d+$/.test(value)) throw new RangeError('FACEBOOK_LOGIN_WAIT_SECONDS must be a positive integer');
+  const seconds = Number(value);
+  if (!Number.isSafeInteger(seconds) || seconds <= 0) {
+    throw new RangeError('FACEBOOK_LOGIN_WAIT_SECONDS must be a positive integer');
+  }
+  return seconds * 1_000;
 }
 
 function parsePort(value: string | undefined): number {

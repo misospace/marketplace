@@ -12,8 +12,8 @@ import type { MarketplaceBackend } from '../src/backend.js';
 import { chromium } from 'playwright';
 import { BrowserSessionManager } from '../src/browser.js';
 import { ProviderError } from '../src/index.js';
-import { createMarketplaceService, type MarketplaceService } from '../src/service.js';
-import { parseBackendKind, parseBackendTimeout } from '../src/service.js';
+import { facebookCredentialsFromEnv } from '../src/facebook-login.js';
+import { createMarketplaceService, type MarketplaceService, parseBackendKind, parseBackendTimeout, parseLoginWaitMs } from '../src/service.js';
 import * as packageEntry from '../src/index.js';
 import { runBackendOperation } from '../src/tools.js';
 import { FakeReauthRuntime } from './helpers/fake-reauth-runtime.js';
@@ -88,6 +88,7 @@ beforeEach(async () => startService());
 afterEach(async () => {
   await Promise.allSettled(clients.splice(0).map((client) => client.close()));
   if (service) await service.close();
+  vi.unstubAllEnvs();
 });
 
 describe('fixture MCP service', () => {
@@ -334,6 +335,44 @@ describe('fixture MCP service', () => {
     expect(packageEntry.ProviderError).toBe(ProviderError);
   });
 
+  it('rejects a half-configured Facebook credential pair during service creation', () => {
+    expect(() => createMarketplaceService({
+      facebookCredentials: facebookCredentialsFromEnv({ FACEBOOK_USERNAME: 'operator' }),
+      backendKind: 'facebook'
+    })).toThrow(TypeError);
+    expect(() => createMarketplaceService({
+      facebookCredentials: { username: 'operator', password: '  ' },
+      backendKind: 'facebook'
+    })).toThrow(TypeError);
+  });
+
+  it('does not read Facebook credentials when the fixture backend is selected', async () => {
+    // A half-configured pair must not break a fixture service: it never touches the secret.
+    vi.stubEnv('FACEBOOK_USERNAME', 'operator');
+    vi.stubEnv('FACEBOOK_PASSWORD', '');
+    try {
+      const fixture = createMarketplaceService({ host: '127.0.0.1', port: 0, adminPort: 0, backendKind: 'fixture' });
+      await fixture.close();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('selects the Facebook backend when MARKETPLACE_BACKEND is set', async () => {
+    vi.stubEnv('MARKETPLACE_BACKEND', 'fixture');
+    await Promise.allSettled(clients.splice(0).map((client) => client.close()));
+    await service.close();
+    vi.stubEnv('MARKETPLACE_BACKEND', 'facebook');
+    service = createMarketplaceService({ host: '127.0.0.1', port: 0, adminPort: 0 });
+    await packageEntry.listen(service);
+    const address = service.address();
+    if (!address || typeof address === 'string') throw new Error('Expected a TCP address');
+    baseUrl = `http://127.0.0.1:${address.port}`;
+    const status = structured(await (await connectClient()).callTool({ name: 'marketplace_status', arguments: {} }));
+    expect(status.backend).toBe('facebook');
+    expect(service.browser.getInfo().browserStarted).toBe(false);
+  });
+
   it('selects the fixture backend by default and supports explicit Facebook selection', async () => {
     expect(structured(await (await connectClient()).callTool({ name: 'marketplace_status', arguments: {} })).backend).toBe('fixture');
     await Promise.allSettled(clients.splice(0).map((client) => client.close()));
@@ -352,6 +391,15 @@ describe('fixture MCP service', () => {
     const backend: MarketplaceBackend = { name: 'injected', search: () => [], fetch: () => null };
     expect(() => createMarketplaceService({ backend, backendKind: 'facebook' }))
       .toThrow(new TypeError('backend and backendKind cannot both select a backend'));
+  });
+
+  it('parses FACEBOOK_LOGIN_WAIT_SECONDS as positive whole seconds', () => {
+    expect(parseLoginWaitMs(undefined)).toBe(180_000);
+    expect(() => createMarketplaceService({ facebookLoginWaitMs: 0 })).toThrow(RangeError);
+    expect(parseLoginWaitMs('2')).toBe(2_000);
+    for (const value of ['', '0', '1.5', '-1', '9007199254740992']) {
+      expect(() => parseLoginWaitMs(value)).toThrow(RangeError);
+    }
   });
 
   it('parses backend selection explicitly and defaults to fixture', () => {

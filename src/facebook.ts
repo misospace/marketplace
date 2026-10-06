@@ -140,7 +140,7 @@ export function toProviderSessionAssessment(info: BrowserSessionInfo): ProviderS
     : 'session_unknown';
 }
 
-async function readFacebookPage(page: Page): Promise<FacebookPageSnapshot> {
+export async function readFacebookPage(page: Page): Promise<FacebookPageSnapshot> {
   const [passwordCount, loginCount, checkpointCount, captchaCount, mainCount, marketplaceLinkCount, authMarkerCount, logoutLinkCount, loginPromptLinkCount, loginPromptButtonCount, checkpointTextCount, captchaTextCount, url] = await Promise.all([
     page.locator('input[type="password"]').count(),
     page.locator('form[action*="/login"], input[name="pass"]').count(),
@@ -221,7 +221,7 @@ export function assertFacebookOrigin(value: string): string {
   return value;
 }
 
-function normalizeFacebookBaseUrl(value: string): string {
+export function normalizeFacebookBaseUrl(value: string): string {
   assertFacebookOrigin(value);
   const url = new URL(value);
   if (url.pathname !== '/' || url.search || url.hash || value.includes('?') || value.includes('#')) {

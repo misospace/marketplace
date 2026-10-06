@@ -1,5 +1,5 @@
 import { errors } from 'playwright';
-import { BrowserSessionManager, BrowserUnavailableError } from './browser.js';
+import { BrowserSessionManager, BrowserUnavailableError, sleepUntilAbort } from './browser.js';
 import {
   fetchInputSchema,
   searchInputSchema,
@@ -19,11 +19,17 @@ import {
   validateFacebookMarkets,
   type FacebookMarket
 } from './facebook-marketplace-url.js';
-import { assertFacebookOrigin, FacebookSessionProbe } from './facebook.js';
+import { assertFacebookOrigin, FacebookSessionProbe, type FacebookProbeCode } from './facebook.js';
+import { FacebookCredentialLogin } from './facebook-login.js';
 
 export interface FacebookMarketplaceBackendOptions {
   browser: BrowserSessionManager;
   probe: FacebookSessionProbe;
+  /**
+   * Optional credential login. When present and the probe reports a plain login requirement,
+   * credentials are submitted and the session is re-probed before the search fails.
+   */
+  login?: FacebookCredentialLogin;
   markets?: readonly FacebookMarket[];
   navigationTimeoutMs?: number;
   settleTimeoutMs?: number;
@@ -35,11 +41,15 @@ export class FacebookMarketplaceBackend implements MarketplaceBackend {
   readonly name = 'facebook';
   private readonly browser: BrowserSessionManager;
   private readonly probe: FacebookSessionProbe;
+  private readonly login: FacebookCredentialLogin | undefined;
   private readonly markets: readonly FacebookMarket[];
   private readonly navigationTimeoutMs: number;
   private readonly settleTimeoutMs: number;
   private readonly maxCards: number;
   private readonly logger: Pick<Console, 'error'>;
+  private readonly loginController = new AbortController();
+  private credentialRecovery: Promise<{ recovered: boolean; code?: FacebookProbeCode }> | undefined;
+  private closePromise: Promise<void> | undefined;
 
   constructor(options: FacebookMarketplaceBackendOptions) {
     if (!options || typeof options !== 'object' || Array.isArray(options)) {
@@ -51,9 +61,13 @@ export class FacebookMarketplaceBackend implements MarketplaceBackend {
     if (!(options.probe instanceof FacebookSessionProbe)) {
       throw new TypeError('options.probe must be a FacebookSessionProbe');
     }
+    if (options.login !== undefined && !(options.login instanceof FacebookCredentialLogin)) {
+      throw new TypeError('options.login must be a FacebookCredentialLogin');
+    }
 
     this.browser = options.browser;
     this.probe = options.probe;
+    this.login = options.login;
     this.markets = options.markets ?? DEFAULT_FACEBOOK_MARKETS;
     this.navigationTimeoutMs = options.navigationTimeoutMs ?? 8_000;
     this.settleTimeoutMs = options.settleTimeoutMs ?? 3_000;
@@ -69,6 +83,15 @@ export class FacebookMarketplaceBackend implements MarketplaceBackend {
     // Validate during construction, with the same rules a configured markets file is held to, so
     // a bad map fails at startup instead of resolving ambiguously on every search.
     validateFacebookMarkets(this.markets);
+  }
+
+  close(): Promise<void> {
+    if (this.closePromise) return this.closePromise;
+    this.loginController.abort(new Error('Facebook backend is shutting down'));
+    this.closePromise = (async () => {
+      await this.credentialRecovery?.catch(() => undefined);
+    })();
+    return this.closePromise;
   }
 
   async search(input: ReturnType<typeof searchInputSchema.parse>, signal: AbortSignal): Promise<Listing[]> {
@@ -93,13 +116,29 @@ export class FacebookMarketplaceBackend implements MarketplaceBackend {
     }
 
     if (session.status === 'session_needs_reauth') {
-      const code = session.code ?? 'SESSION_INVALID';
-      const messages = {
-        LOGIN_REQUIRED: 'Facebook Marketplace requires login.',
-        CAPTCHA_REQUIRED: 'Facebook Marketplace requires a captcha challenge.',
-        SESSION_INVALID: 'The Facebook session requires a security check.'
-      } as const;
-      throw new ProviderError(code, messages[code]);
+      // Credentials are submitted only for a plain login requirement. A captcha or checkpoint
+      // already means a human is needed, and re-submitting credentials there is exactly the loop
+      // the manual re-auth flow exists to avoid.
+      const recovery = await this.waitForCredentialLogin(session.code, signal);
+      if (!recovery.recovered) {
+        const code = recovery.code ?? session.code ?? 'SESSION_INVALID';
+        const messages = {
+          LOGIN_REQUIRED: 'Facebook Marketplace requires login.',
+          CAPTCHA_REQUIRED: 'Facebook Marketplace requires a captcha challenge.',
+          SESSION_INVALID: 'The Facebook session requires a security check.'
+        } as const;
+        throw new ProviderError(code, messages[code]);
+      }
+      session = await this.confirmCredentialLogin(signal);
+      if (session.status !== 'session_usable') {
+        const code = session.code ?? 'SESSION_INVALID';
+        const messages = {
+          LOGIN_REQUIRED: 'Facebook Marketplace requires login.',
+          CAPTCHA_REQUIRED: 'Facebook Marketplace requires a captcha challenge.',
+          SESSION_INVALID: 'The Facebook session requires a security check.'
+        } as const;
+        throw new ProviderError(code, messages[code]);
+      }
     }
     if (session.status === 'session_unknown') {
       // The frozen error contract has no "unverified" code; SESSION_INVALID points an operator at the re-auth console, and the message states plainly that verification failed.
@@ -165,29 +204,93 @@ export class FacebookMarketplaceBackend implements MarketplaceBackend {
     return [...outcome.listings];
   }
 
+  /**
+   * Submits optional credentials when the probe reported a plain login requirement, then confirms
+   * the outcome with the probe rather than trusting the login attempt's own classification.
+   *
+   * Returns the code to surface when recovery did not happen, so a challenge encountered during
+   * the attempt is reported as itself rather than as the original login requirement.
+   */
+  private async waitForCredentialLogin(
+    code: FacebookProbeCode | undefined,
+    signal: AbortSignal
+  ): Promise<{ recovered: boolean; code?: FacebookProbeCode }> {
+    if (!this.login || code !== 'LOGIN_REQUIRED') return { recovered: false };
+    if (this.closePromise || this.loginController.signal.aborted) {
+      throw this.loginController.signal.reason ?? new Error('Facebook backend is shutting down');
+    }
+
+    const recovery = this.credentialRecovery ?? this.startCredentialLogin();
+    let outcome: { recovered: boolean; code?: FacebookProbeCode } | undefined;
+    try {
+      outcome = await waitForRequestBudget(recovery, signal);
+    } catch (error) {
+      if (signal.aborted) return { recovered: false, code: 'LOGIN_REQUIRED' };
+      throw error;
+    }
+    if (outcome === undefined) return { recovered: false, code: 'LOGIN_REQUIRED' };
+    return outcome;
+  }
+
+  private async confirmCredentialLogin(signal: AbortSignal): Promise<Awaited<ReturnType<FacebookSessionProbe['probeSession']>>> {
+    try {
+      return await this.probe.probeSession(signal);
+    } catch (error) {
+      if (signal.aborted) throw signal.reason ?? error;
+      if (error instanceof ProviderError) throw error;
+      if (error instanceof BrowserUnavailableError) {
+        throw new ProviderError('UPSTREAM_ERROR', 'The browser session is not available.');
+      }
+      throw new ProviderError('UPSTREAM_ERROR', 'The Facebook session could not be verified.');
+    }
+  }
+
+  private startCredentialLogin(): Promise<{ recovered: boolean; code?: FacebookProbeCode }> {
+    const attempt = Promise.resolve().then(() => this.performCredentialLogin());
+    this.credentialRecovery = attempt;
+    void attempt.finally(() => {
+      if (this.credentialRecovery === attempt) this.credentialRecovery = undefined;
+    }).catch(() => undefined);
+    return attempt;
+  }
+
+  private async performCredentialLogin(): Promise<{ recovered: boolean; code?: FacebookProbeCode }> {
+    try {
+      const outcome = await this.login!.attempt(this.loginController.signal);
+      if (outcome.outcome !== 'authenticated') {
+        return { recovered: false, ...(outcome.code !== undefined ? { code: outcome.code } : {}) };
+      }
+      return { recovered: true };
+    } catch (error) {
+      if (this.loginController.signal.aborted) throw this.loginController.signal.reason ?? error;
+      if (error instanceof ProviderError) throw error;
+      if (error instanceof BrowserUnavailableError) {
+        throw new ProviderError('UPSTREAM_ERROR', 'The browser session is not available.');
+      }
+      throw new ProviderError('UPSTREAM_ERROR', 'The Facebook session could not be established.');
+    }
+  }
+
   fetch(_input: ReturnType<typeof fetchInputSchema.parse>, _signal: AbortSignal): Listing | null {
     // A null result would incorrectly report an unimplemented operation as NOT_FOUND.
     throw new ProviderError('UPSTREAM_ERROR', 'Listing fetch is not implemented for the Facebook backend.');
   }
 }
 
-function sleepUntilAbort(milliseconds: number, signal: AbortSignal): Promise<void> {
-  return new Promise((resolve) => {
-    if (signal.aborted) {
-      resolve();
-      return;
-    }
+function waitForRequestBudget<T>(promise: Promise<T>, signal: AbortSignal): Promise<T | undefined> {
+  if (signal.aborted) return Promise.reject(signal.reason ?? new Error('Browser operation aborted'));
+  return new Promise<T | undefined>((resolve, reject) => {
     const onAbort = (): void => {
-      clearTimeout(timer);
-      signal.removeEventListener('abort', onAbort);
-      resolve();
+      cleanup();
+      resolve(undefined);
     };
-    const timer = setTimeout(() => {
-      signal.removeEventListener('abort', onAbort);
-      resolve();
-    }, milliseconds);
+    const cleanup = (): void => signal.removeEventListener('abort', onAbort);
     signal.addEventListener('abort', onAbort, { once: true });
     if (signal.aborted) onAbort();
+    promise.then(
+      (result) => { cleanup(); resolve(result); },
+      (error: unknown) => { cleanup(); reject(error); }
+    );
   });
 }
 
