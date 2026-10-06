@@ -97,9 +97,12 @@ export function createMarketplaceService(options: ServiceOptions = {}): Marketpl
     ...(options.facebookBaseUrl !== undefined ? { baseUrl: options.facebookBaseUrl } : {}),
     logger
   });
-  // Read here rather than at module load: a half-configured pair must fail service startup
-  // loudly, without making the module itself unimportable.
-  const credentials = options.facebookCredentials ?? facebookCredentialsFromEnv(process.env);
+  // Read here rather than at module load, and only when the Facebook backend can actually use it:
+  // a fixture service has no business touching the secret, and must not fail on a half-configured
+  // pair. A half-configured pair still fails loudly once the Facebook backend is selected.
+  const credentials = selectedBackendKind === 'facebook' && options.backend === undefined
+    ? (options.facebookCredentials ?? facebookCredentialsFromEnv(process.env))
+    : undefined;
   const login = credentials === undefined
     ? undefined
     : new FacebookCredentialLogin({

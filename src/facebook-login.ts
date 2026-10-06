@@ -4,7 +4,6 @@ import { ProviderError } from './backend.js';
 import {
   FACEBOOK_ORIGIN,
   FACEBOOK_MARKETPLACE_PATH,
-  assertFacebookOrigin,
   classifyFacebookSession,
   normalizeFacebookBaseUrl,
   readFacebookPage,
@@ -118,7 +117,14 @@ export class FacebookCredentialLogin {
 
     this.browser = options.browser;
     this.baseUrl = normalizeFacebookBaseUrl(options.baseUrl ?? FACEBOOK_ORIGIN);
-    this.loginUrl = assertFacebookOrigin(new URL(options.loginPath ?? FACEBOOK_LOGIN_PATH, this.baseUrl).href);
+    // Same-origin, not merely "an approved origin": assertFacebookOrigin accepts either Facebook or
+    // any loopback host, so on its own it would let an absolute loginPath point the credential sink
+    // at a different origin than the configured base.
+    const loginUrl = new URL(options.loginPath ?? FACEBOOK_LOGIN_PATH, this.baseUrl);
+    if (loginUrl.origin !== this.baseUrl) {
+      throw new TypeError('loginPath must resolve to the same origin as baseUrl');
+    }
+    this.loginUrl = loginUrl.href;
     // Held off-instance so serializing the login object cannot expose the credentials.
     credentialStore.set(this, { username: options.username, password: options.password });
     this.waitMs = options.waitMs ?? FACEBOOK_LOGIN_WAIT_DEFAULT_MS;

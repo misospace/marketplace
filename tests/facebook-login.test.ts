@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { chromium, type Page } from 'playwright';
 import { BrowserSessionManager } from '../src/browser.js';
-import { FacebookSessionProbe } from '../src/facebook.js';
+import { FACEBOOK_ORIGIN, FacebookSessionProbe } from '../src/facebook.js';
 import {
   FACEBOOK_LOGIN_WAIT_DEFAULT_MS,
   FacebookCredentialLogin,
@@ -109,6 +109,28 @@ describe('facebookCredentialsFromEnv', () => {
     const serialized = JSON.stringify(login);
     expect(serialized).not.toContain(USERNAME_SENTINEL);
     expect(serialized).not.toContain(PASSWORD_SENTINEL);
+  });
+
+  itWithTimeout('rejects a login path that escapes a production base to a loopback origin', () => {
+    // assertFacebookOrigin accepts either Facebook or any loopback host, so it alone would let the
+    // credential sink be pointed at loopback from a production base. The login must be same-origin.
+    expect(() => new FacebookCredentialLogin({
+      browser: createManager(),
+      username: USERNAME_SENTINEL,
+      password: PASSWORD_SENTINEL,
+      baseUrl: FACEBOOK_ORIGIN,
+      loginPath: 'http://127.0.0.1:12345/login'
+    })).toThrow(TypeError);
+  });
+
+  itWithTimeout('rejects a login path on a different loopback port than the base', () => {
+    expect(() => new FacebookCredentialLogin({
+      browser: createManager(),
+      username: USERNAME_SENTINEL,
+      password: PASSWORD_SENTINEL,
+      baseUrl: 'http://127.0.0.1:1111',
+      loginPath: 'http://127.0.0.1:2222/login'
+    })).toThrow(TypeError);
   });
 });
 

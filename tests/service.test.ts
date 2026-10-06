@@ -346,6 +346,18 @@ describe('fixture MCP service', () => {
     })).toThrow(TypeError);
   });
 
+  it('does not read Facebook credentials when the fixture backend is selected', async () => {
+    // A half-configured pair must not break a fixture service: it never touches the secret.
+    vi.stubEnv('FACEBOOK_USERNAME', 'operator');
+    vi.stubEnv('FACEBOOK_PASSWORD', '');
+    try {
+      const fixture = createMarketplaceService({ host: '127.0.0.1', port: 0, adminPort: 0, backendKind: 'fixture' });
+      await fixture.close();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it('selects the Facebook backend when MARKETPLACE_BACKEND is set', async () => {
     vi.stubEnv('MARKETPLACE_BACKEND', 'fixture');
     await Promise.allSettled(clients.splice(0).map((client) => client.close()));

@@ -70,7 +70,7 @@ When `MARKETPLACE_BACKEND=facebook` and the probe reports `LOGIN_REQUIRED`, the 
 
 Credentials are optional and environment-only:
 
-- `FACEBOOK_USERNAME` / `FACEBOOK_PASSWORD` — set together or not at all; a half-configured pair fails startup. They are never written to disk, returned in a tool result, placed in a URL, or logged. A login is attempted only for a plain login requirement.
+- `FACEBOOK_USERNAME` / `FACEBOOK_PASSWORD` — set together or not at all; a half-configured pair fails startup once the Facebook backend is selected. They are read only for that backend, so a fixture deployment never touches them. They are never written to disk, returned in a tool result, placed in a URL, or logged. A login is attempted only for a plain login requirement.
 - `FACEBOOK_LOGIN_WAIT_SECONDS` — how long to wait for the mobile approval, as a positive integer. Defaults to 180.
 
 This is not a 2FA implementation and it bypasses nothing. A captcha stops the attempt immediately, because it cannot be satisfied from the phone. A checkpoint is tolerated while the window is open — Facebook uses one as the gate for the approval itself — and reported as `SESSION_INVALID` only once the window closes. Either outcome, and a timeout, leaves the session `session_unknown` or `session_needs_reauth`, never usable, and hands off to the manual re-auth console below. Credentials are submitted at most once per attempt; a challenge never triggers a retry.
