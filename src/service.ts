@@ -27,8 +27,6 @@ const BACKEND_TIMEOUT_MS = parseBackendTimeout(process.env.BACKEND_TIMEOUT_MS);
 const REAUTH_ADMIN_PORT = parseConfiguredPort(process.env.REAUTH_ADMIN_PORT, 'REAUTH_ADMIN_PORT', 8787);
 const REAUTH_VIEWER_PORT = parseConfiguredPort(process.env.REAUTH_VIEWER_PORT, 'REAUTH_VIEWER_PORT', 6080);
 const REAUTH_LEASE_MS = parseReauthLease(process.env.REAUTH_LEASE_MS);
-const MARKETPLACE_BACKEND = parseBackendKind(process.env.MARKETPLACE_BACKEND);
-const FACEBOOK_LOGIN_WAIT_MS = parseLoginWaitMs(process.env.FACEBOOK_LOGIN_WAIT_SECONDS);
 
 export interface ServiceOptions {
   backend?: MarketplaceBackend;
@@ -70,6 +68,15 @@ export function createMarketplaceService(options: ServiceOptions = {}): Marketpl
   if (options.backend !== undefined && options.backendKind === 'facebook') {
     throw new TypeError('backend and backendKind cannot both select a backend');
   }
+  if (options.facebookCredentials !== undefined &&
+      (!options.facebookCredentials.username.trim() || !options.facebookCredentials.password.trim())) {
+    throw new TypeError('FACEBOOK_USERNAME and FACEBOOK_PASSWORD must be set together');
+  }
+  const selectedBackendKind = options.backendKind ?? parseBackendKind(process.env.MARKETPLACE_BACKEND);
+  const loginWaitMs = options.facebookLoginWaitMs ?? parseLoginWaitMs(process.env.FACEBOOK_LOGIN_WAIT_SECONDS);
+  if (!Number.isSafeInteger(loginWaitMs) || loginWaitMs <= 0) {
+    throw new RangeError('facebookLoginWaitMs must be a positive safe integer');
+  }
   const host = options.host ?? HOST;
   const port = options.port ?? PORT;
   if (!Number.isInteger(port) || port < 0 || port > 65_535) {
@@ -100,10 +107,10 @@ export function createMarketplaceService(options: ServiceOptions = {}): Marketpl
       username: credentials.username,
       password: credentials.password,
       ...(options.facebookBaseUrl !== undefined ? { baseUrl: options.facebookBaseUrl } : {}),
-      waitMs: options.facebookLoginWaitMs ?? FACEBOOK_LOGIN_WAIT_MS,
+      waitMs: loginWaitMs,
       logger
     });
-  const backend = options.backend ?? ((options.backendKind ?? MARKETPLACE_BACKEND) === 'facebook'
+  const backend = options.backend ?? (selectedBackendKind === 'facebook'
     ? new FacebookMarketplaceBackend({
       browser,
       probe: facebook,
@@ -256,6 +263,7 @@ export function createMarketplaceService(options: ServiceOptions = {}): Marketpl
     shuttingDown = true;
     shutdownController.abort(new Error('Service shutting down'));
     closePromise = (async () => {
+      if (backend instanceof FacebookMarketplaceBackend) await backend.close();
       await stopReauthBounded(reauth, logger);
       await admin.close().catch((error: unknown) => {
         try {

@@ -13,6 +13,7 @@ import {
 } from '../src/facebook-login.js';
 import { FacebookMarketplaceBackend } from '../src/facebook-marketplace-backend.js';
 import { ProviderError } from '../src/backend.js';
+import { runBackendOperation } from '../src/tools.js';
 
 const browserAvailable = existsSync(chromium.executablePath());
 if (!browserAvailable && process.env.REQUIRE_BROWSER_TESTS === '1') {
@@ -42,6 +43,8 @@ type LoginMode =
   | 'authenticated'
   | 'login-required'
   | 'approve-after-submit'
+  | 'approve-home-after-submit'
+  | 'deadline-then-approve'
   | 'never-approves'
   | 'captcha-after-submit'
   | 'checkpoint-after-submit'
@@ -55,6 +58,8 @@ interface SyntheticLoginServer {
   /** Raw request bodies of every form submission, in order. */
   submissions: string[];
   setMode(mode: LoginMode): void;
+  setApprovalDelay(milliseconds: number): void;
+  setApprovalPage(path: '/' | '/marketplace/'): void;
   close(): Promise<void>;
 }
 
@@ -91,6 +96,7 @@ describe('facebookCredentialsFromEnv', () => {
     expect(() => new FacebookCredentialLogin({ browser: manager, username: 'x', password: '' })).toThrow(TypeError);
     expect(() => new FacebookCredentialLogin({ browser: manager, username: 'x', password: 'y', waitMs: 0 })).toThrow(RangeError);
     expect(() => new FacebookCredentialLogin({ browser: manager, username: 'x', password: 'y', baseUrl: 'https://evil.example' })).toThrow(TypeError);
+    expect(() => new FacebookCredentialLogin({ browser: manager, username: 'x', password: 'y', loginPath: 'https://evil.example/login' })).toThrow(TypeError);
   });
 
   itWithTimeout('does not expose the credentials when the login object is serialized', () => {
@@ -157,6 +163,33 @@ describe('Facebook credential login submission failures', () => {
 });
 
 describe.skipIf(!browserAvailable)('Facebook credential login', () => {
+  itWithTimeout('keeps the credential login alive after the search deadline expires', async () => {
+    const { manager, login, server } = await harness('deadline-then-approve', undefined, {
+      username: 'u',
+      password: 'p',
+      waitMs: 10_000
+    });
+    server.setApprovalDelay(7_500);
+    server.setApprovalPage('/');
+    const probe = new FacebookSessionProbe({ browser: manager, baseUrl: server.origin, navigationTimeoutMs: 2_000, settleTimeoutMs: 150 });
+    const backend = new FacebookMarketplaceBackend({ browser: manager, probe, login, logger: { error: () => undefined } });
+    const operation = runBackendOperation(
+      (signal) => backend.search({ query: 'bike', location: 'NYC', limit: 5 }, signal),
+      5_000,
+      new AbortController().signal
+    );
+
+    // The search overruns its own backend deadline, so the existing contract surfaces TIMEOUT.
+    // What matters is that the in-flight login is not cancelled along with it.
+    await expect(operation).rejects.toMatchObject({ code: 'TIMEOUT' });
+    expect(server.submissions).toHaveLength(1);
+    expect(manager.getInfo().status).not.toBe('session_usable');
+    await new Promise((resolve) => setTimeout(resolve, 3_000));
+    await expect(probe.probeSession(new AbortController().signal)).resolves.toMatchObject({ status: 'session_usable' });
+    expect(server.submissions).toHaveLength(1);
+    await backend.close();
+  });
+
   itWithTimeout('skips the credential login entirely when the profile is already authenticated', async () => {
     const { manager, login, server } = await harness('authenticated');
 
@@ -192,12 +225,43 @@ describe.skipIf(!browserAvailable)('Facebook credential login', () => {
     const { manager, login, server } = await harness('approve-after-submit');
 
     await expect(login.attempt(new AbortController().signal)).resolves.toEqual({ outcome: 'authenticated' });
-    expect(manager.getInfo().status).toBe('session_usable');
+    expect(manager.getInfo().status).toBe('session_unknown');
     expect(server.submissions).toHaveLength(1);
 
-    // The authenticated profile is what makes the next search skip the login.
+    // The authenticated profile is what makes the next probe verify the login.
     const probe = new FacebookSessionProbe({ browser: manager, baseUrl: server.origin, navigationTimeoutMs: 2_000, settleTimeoutMs: 150 });
     await expect(probe.probeSession(new AbortController().signal)).resolves.toMatchObject({ status: 'session_usable' });
+  });
+
+  itWithTimeout('navigates to Marketplace when approval lands on the authenticated home page', async () => {
+    const { manager, login, server } = await harness('approve-home-after-submit');
+
+    await expect(login.attempt(new AbortController().signal)).resolves.toEqual({ outcome: 'authenticated' });
+    expect(server.requests).toContain('/');
+    expect(server.requests).toContain('/marketplace/');
+    expect(manager.getInfo().status).toBe('session_unknown');
+  });
+
+  itWithTimeout('preserves whitespace in the submitted password exactly', async () => {
+    const server = await startLoginServer();
+    servers.push(server);
+    server.setMode('never-approves');
+    const manager = createManager();
+    const password = '  opaque password  ';
+    const login = new FacebookCredentialLogin({
+      browser: manager,
+      username: USERNAME_SENTINEL,
+      password,
+      baseUrl: server.origin,
+      waitMs: 200,
+      pollIntervalMs: 20,
+      navigationTimeoutMs: 2_000,
+      logger: { error: () => undefined }
+    });
+
+    await login.attempt(new AbortController().signal);
+    const submitted = new URLSearchParams(server.submissions[0]!);
+    expect(submitted.get('pass')).toBe(password);
   });
 
   itWithTimeout('leaves the session safely unauthenticated when the wait window expires', async () => {
@@ -294,7 +358,11 @@ function createManager(): BrowserSessionManager {
 
 async function harness(
   mode: LoginMode,
-  logger: Pick<Console, 'error'> = { error: () => undefined }
+  logger: Pick<Console, 'error'> = { error: () => undefined },
+  credentials: { username: string; password: string; waitMs?: number } = {
+    username: USERNAME_SENTINEL,
+    password: PASSWORD_SENTINEL
+  }
 ): Promise<{ manager: BrowserSessionManager; login: FacebookCredentialLogin; server: SyntheticLoginServer }> {
   const server = await startLoginServer();
   servers.push(server);
@@ -302,10 +370,10 @@ async function harness(
   server.setMode(mode);
   const login = new FacebookCredentialLogin({
     browser: manager,
-    username: USERNAME_SENTINEL,
-    password: PASSWORD_SENTINEL,
+    username: credentials.username,
+    password: credentials.password,
     baseUrl: server.origin,
-    waitMs: TEST_WAIT_MS,
+    waitMs: credentials.waitMs ?? TEST_WAIT_MS,
     pollIntervalMs: POLL_INTERVAL_MS,
     navigationTimeoutMs: 2_000,
     logger
@@ -317,6 +385,9 @@ async function startLoginServer(): Promise<SyntheticLoginServer> {
   const requests: string[] = [];
   const submissions: string[] = [];
   let mode: LoginMode = 'authenticated';
+  let approved = true;
+  let approvalDelayMs = APPROVAL_DELAY_MS;
+  let approvalPath: '/' | '/marketplace/' = '/marketplace/';
   const server = createServer((request, response) => {
     const url = new URL(request.url ?? '/', 'http://127.0.0.1');
     requests.push(url.pathname);
@@ -337,9 +408,13 @@ async function startLoginServer(): Promise<SyntheticLoginServer> {
           response.writeHead(302, { location });
           response.end();
         };
-        if (mode === 'approve-after-submit') {
+        if (mode === 'approve-after-submit' || mode === 'approve-home-after-submit' || mode === 'deadline-then-approve') {
+          approved = false;
           // Hold the navigation briefly, standing in for the operator approving on their phone.
-          setTimeout(() => redirect('/marketplace/'), APPROVAL_DELAY_MS);
+          setTimeout(() => {
+            approved = true;
+            redirect(mode === 'approve-home-after-submit' ? '/' : approvalPath);
+          }, approvalDelayMs);
           return;
         }
         if (mode === 'captcha-after-submit') {
@@ -369,7 +444,7 @@ async function startLoginServer(): Promise<SyntheticLoginServer> {
       return;
     }
     if (url.pathname.startsWith('/marketplace/')) {
-      response.end(mode === 'login-required' ? loginFormPage() : authenticatedPage());
+      response.end(mode === 'login-required' || !approved ? loginFormPage() : authenticatedPage());
       return;
     }
     response.end(authenticatedPage());
@@ -386,7 +461,9 @@ async function startLoginServer(): Promise<SyntheticLoginServer> {
     origin: `http://127.0.0.1:${address.port}`,
     requests,
     submissions,
-    setMode: (nextMode) => { mode = nextMode; },
+    setMode: (nextMode) => { mode = nextMode; approved = nextMode === 'authenticated'; },
+    setApprovalDelay: (milliseconds) => { approvalDelayMs = milliseconds; },
+    setApprovalPage: (path) => { approvalPath = path; },
     close: async () => {
       server.closeAllConnections();
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));

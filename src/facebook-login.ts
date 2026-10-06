@@ -3,9 +3,12 @@ import { BrowserSessionManager, sleepUntilAbort } from './browser.js';
 import { ProviderError } from './backend.js';
 import {
   FACEBOOK_ORIGIN,
+  FACEBOOK_MARKETPLACE_PATH,
+  assertFacebookOrigin,
   classifyFacebookSession,
   normalizeFacebookBaseUrl,
   readFacebookPage,
+  type FacebookPageSnapshot,
   type FacebookProbeCode,
   type FacebookSessionProbeResult
 } from './facebook.js';
@@ -74,12 +77,12 @@ const credentialStore = new WeakMap<FacebookCredentialLogin, FacebookCredentials
  */
 export function facebookCredentialsFromEnv(env: NodeJS.ProcessEnv = process.env): FacebookCredentials | undefined {
   const username = readCredential(env.FACEBOOK_USERNAME);
-  const password = readCredential(env.FACEBOOK_PASSWORD);
-  if (username === undefined && password === undefined) return undefined;
-  if (username === undefined || password === undefined) {
+  const rawPassword = readOpaqueCredential(env.FACEBOOK_PASSWORD);
+  if (username === undefined && rawPassword === undefined) return undefined;
+  if (username === undefined || rawPassword === undefined) {
     throw new TypeError('FACEBOOK_USERNAME and FACEBOOK_PASSWORD must be set together');
   }
-  return { username, password };
+  return { username, password: rawPassword };
 }
 
 /**
@@ -109,13 +112,13 @@ export class FacebookCredentialLogin {
     if (typeof options.username !== 'string' || !options.username.trim()) {
       throw new TypeError('options.username must be a non-empty string');
     }
-    if (typeof options.password !== 'string' || !options.password) {
+    if (typeof options.password !== 'string' || !options.password.trim()) {
       throw new TypeError('options.password must be a non-empty string');
     }
 
     this.browser = options.browser;
     this.baseUrl = normalizeFacebookBaseUrl(options.baseUrl ?? FACEBOOK_ORIGIN);
-    this.loginUrl = new URL(options.loginPath ?? FACEBOOK_LOGIN_PATH, this.baseUrl).href;
+    this.loginUrl = assertFacebookOrigin(new URL(options.loginPath ?? FACEBOOK_LOGIN_PATH, this.baseUrl).href);
     // Held off-instance so serializing the login object cannot expose the credentials.
     credentialStore.set(this, { username: options.username, password: options.password });
     this.waitMs = options.waitMs ?? FACEBOOK_LOGIN_WAIT_DEFAULT_MS;
@@ -189,16 +192,24 @@ export class FacebookCredentialLogin {
       if (signal.aborted) throw signal.reason ?? new Error('Browser operation aborted');
 
       try {
-        last = classifyFacebookSession(await readFacebookPage(page), this.baseUrl);
-      } catch {
+        const snapshot = await readFacebookPage(page);
+        last = classifyFacebookSession(snapshot, this.baseUrl);
+        if (last.status === 'session_usable') return { outcome: 'authenticated' };
+        if (last.status === 'session_unknown' && isAuthenticatedNonMarketplacePage(snapshot, this.baseUrl)) {
+          await page.goto(new URL(FACEBOOK_MARKETPLACE_PATH, this.baseUrl).href, {
+            waitUntil: 'domcontentloaded',
+            timeout: this.navigationTimeoutMs,
+            signal
+          });
+          last = classifyFacebookSession(await readFacebookPage(page), this.baseUrl);
+          if (last.status === 'session_usable') return { outcome: 'authenticated' };
+        }
+      } catch (error) {
+        if (signal.aborted) throw signal.reason ?? error;
         // A read taken mid-navigation is not decisive; keep waiting rather than failing the login.
         last = { status: 'session_unknown', outcome: 'ambiguous' };
       }
 
-      if (last.status === 'session_usable') {
-        this.browser.assessSession('session_usable');
-        return { outcome: 'authenticated' };
-      }
       if (last.outcome === 'captcha') {
         // A captcha cannot be satisfied from the phone, so stop rather than burning the window.
         this.browser.assessSession('session_needs_reauth');
@@ -206,6 +217,27 @@ export class FacebookCredentialLogin {
       }
       if (Date.now() >= deadline) break;
       await sleepUntilAbort(this.pollIntervalMs, signal);
+    }
+
+    // Do not navigate past a checkpoint once its approval window has closed.
+    if (last.outcome === 'checkpoint') {
+      this.browser.assessSession('session_needs_reauth');
+      return { outcome: 'challenge', code: 'SESSION_INVALID' };
+    }
+
+    // Match the reference flow's final Marketplace navigation, even when approval landed elsewhere.
+    if (signal.aborted) throw signal.reason ?? new Error('Browser operation aborted');
+    try {
+      await page.goto(new URL(FACEBOOK_MARKETPLACE_PATH, this.baseUrl).href, {
+        waitUntil: 'domcontentloaded',
+        timeout: this.navigationTimeoutMs,
+        signal
+      });
+      last = classifyFacebookSession(await readFacebookPage(page), this.baseUrl);
+      if (last.status === 'session_usable') return { outcome: 'authenticated' };
+    } catch (error) {
+      if (signal.aborted) throw signal.reason ?? error;
+      last = { status: 'session_unknown', outcome: 'ambiguous' };
     }
 
     // A checkpoint is not treated as fatal while the window is open: Facebook uses one as the gate
@@ -243,6 +275,24 @@ function readCredential(value: string | undefined): string | undefined {
   if (typeof value !== 'string') return undefined;
   const trimmed = value.trim();
   return trimmed ? trimmed : undefined;
+}
+
+function readOpaqueCredential(value: string | undefined): string | undefined {
+  return typeof value === 'string' && value.trim() ? value : undefined;
+}
+
+function isAuthenticatedNonMarketplacePage(
+  snapshot: FacebookPageSnapshot,
+  baseUrl: string
+): boolean {
+  try {
+    const url = new URL(snapshot.url);
+    return url.origin === new URL(baseUrl).origin &&
+      (url.pathname !== '/marketplace' && !url.pathname.startsWith('/marketplace/')) &&
+      snapshot.hasAuthenticatedMarker && !snapshot.hasPasswordInput && !snapshot.hasLoginForm;
+  } catch {
+    return false;
+  }
 }
 
 function validateTimeout(value: number, name: string): void {
