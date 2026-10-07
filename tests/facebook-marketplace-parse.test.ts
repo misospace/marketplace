@@ -73,7 +73,7 @@ describe('Marketplace price parsing', () => {
     ['1.234,56 €', 'USD', 1234.56, 'EUR'],
     ['FREE', 'USD', 0, 'USD']
   ])('parses %s', (text, currency, price, expectedCurrency) => {
-    expect(parseMarketplacePrice(text, currency)).toEqual({ status: 'ok', price, currency: expectedCurrency });
+    expect(parseMarketplacePrice(text, currency)).toMatchObject({ status: 'ok', price, currency: expectedCurrency });
   });
 
   it.each(['$1,2,3', '-$100', '$1k', '$1e3', '$1.5k', '$1x', '$12.345', '$1.500', '1,500 €'])('marks malformed token %s', (text) => {
@@ -85,7 +85,7 @@ describe('Marketplace price parsing', () => {
     ['1.500 €', 'USD', 1500, 'EUR'],
     ['$1,234.56', 'USD', 1234.56, 'USD']
   ])('parses locale-aware grouped amount %s', (text, marketCurrency, price, currency) => {
-    expect(parseMarketplacePrice(text, marketCurrency)).toEqual({ status: 'ok', price, currency });
+    expect(parseMarketplacePrice(text, marketCurrency)).toMatchObject({ status: 'ok', price, currency });
   });
 
   it.each(['$abc', '$', 'USD', '3 krabs', 'tikkr'])('treats non-adjacent currency prose %s as absent', (text) => {
@@ -93,7 +93,7 @@ describe('Marketplace price parsing', () => {
   });
 
   it('continues past malformed price markers to find a later valid price', () => {
-    expect(parseMarketplacePrice('$1,2,3\n$200', 'USD')).toEqual({ status: 'ok', price: 200, currency: 'USD' });
+    expect(parseMarketplacePrice('$1,2,3\n$200', 'USD')).toEqual({ status: 'ok', price: 200, currency: 'USD', marker: '$' });
   });
 
   it.each(['2018', '123K miles', '3 mi', 'Free local pickup available', ''])('does not infer a price from %s', (text) => {
@@ -105,6 +105,13 @@ describe('Marketplace price parsing', () => {
     expect(parseMarketplacePrice('FREE delivery, was $50, now $30', 'USD').price).toBe(50);
     expect(parseMarketplacePrice('$99', 'CAD').currency).toBe('CAD');
     expect(parseMarketplacePrice('$99', 'EUR').currency).toBe('USD');
+  });
+
+  it('reports the matched price marker without changing parsed currency', () => {
+    expect(parseMarketplacePrice('$99', 'CAD')).toMatchObject({ status: 'ok', price: 99, currency: 'CAD', marker: '$' });
+    expect(parseMarketplacePrice('$1,2,3', 'CAD')).toMatchObject({ status: 'malformed', marker: '$' });
+    expect(parseMarketplacePrice('Free', 'CAD')).not.toHaveProperty('marker');
+    expect(parseMarketplacePrice('500', '')).not.toHaveProperty('marker');
   });
 
   it('leaves the currency empty for a markerless number without market context', () => {
@@ -342,6 +349,35 @@ describe('Marketplace item parsing', () => {
     const outcome = interpretMarketplaceItem({ ...itemInput(pageValue), fallbackCurrency: undefined });
     expect(outcome).toMatchObject({ kind: 'error', code: 'UPSTREAM_ERROR' });
     expect(JSON.stringify(outcome)).toContain('currency');
+  });
+
+  it('requires a resolved dollar market for a bare dollar marker', () => {
+    const pageValue = itemPage({ priceText: '$500' });
+    // A resolved dollar market identifies the bare marker.
+    expect(interpretMarketplaceItem({ ...itemInput(pageValue), fallbackCurrency: 'CAD' })).toMatchObject({
+      kind: 'listing',
+      listing: { price: 500, currency: 'CAD' }
+    });
+    // A non-dollar market, or no market at all, is not evidence for any dollar currency.
+    expect(interpretMarketplaceItem({ ...itemInput(pageValue), fallbackCurrency: 'EUR' })).toMatchObject({
+      kind: 'error',
+      code: 'UPSTREAM_ERROR'
+    });
+    expect(interpretMarketplaceItem({ ...itemInput(pageValue), fallbackCurrency: undefined })).toMatchObject({
+      kind: 'error',
+      code: 'UPSTREAM_ERROR'
+    });
+  });
+
+  it('accepts explicit currency markers with no resolved market', () => {
+    const cases = [['US$500', 'USD'], ['CA$500', 'CAD'], ['C$500', 'CAD'], ['€500', 'EUR'], ['£500', 'GBP'], ['500 GBP', 'GBP']] as const;
+    for (const [priceText, currency] of cases) {
+      const outcome = interpretMarketplaceItem({
+        ...itemInput(itemPage({ priceText })),
+        fallbackCurrency: undefined
+      });
+      expect(outcome).toMatchObject({ kind: 'listing', listing: { price: 500, currency } });
+    }
   });
 
   it('fails closed for an unknown layout', () => {

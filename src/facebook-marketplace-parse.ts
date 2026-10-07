@@ -29,6 +29,7 @@ export interface MarketplacePriceParse {
   status: typeof PRICE_PARSE_STATUSES[number];
   price: number | null;
   currency: string;
+  marker?: string;
 }
 
 export const CURRENCY_SYMBOLS: Readonly<Record<string, string>> = {
@@ -69,8 +70,8 @@ const MARKER_PATTERN = new RegExp(
   'gu'
 );
 
-function makePriceResult(status: MarketplacePriceParse['status'], price: number | null, currency: string): MarketplacePriceParse {
-  return { status, price, currency };
+function makePriceResult(status: MarketplacePriceParse['status'], price: number | null, currency: string, marker?: string): MarketplacePriceParse {
+  return { status, price, currency, ...(marker !== undefined ? { marker } : {}) };
 }
 
 function parseNumberToken(token: string, currency: string): number | null {
@@ -134,6 +135,7 @@ export function parseMarketplacePrice(text: string, marketCurrency: string): Mar
   // Only the first valid price token is used, so a strikethrough/previous price is not distinguished from the current price.
   const boundedText = text.slice(0, 600);
   let malformedCurrency: string | null = null;
+  let malformedMarker: string | null = null;
 
   for (const line of boundedText.split('\n')) {
     if (/^free\s*[.!]?$/i.test(line.trim())) return makePriceResult('ok', 0, marketCurrency);
@@ -170,13 +172,16 @@ export function parseMarketplacePrice(text: string, marketCurrency: string): Mar
 
       const signPrefixed = /-\s*$/.test(before) || /^\s*-\s*\d/.test(after);
       const price = numberToken && !signPrefixed ? parseNumberToken(numberToken, currency) : null;
-      if (price !== null) return makePriceResult('ok', price, currency);
-      malformedCurrency ??= currency;
+      if (price !== null) return makePriceResult('ok', price, currency, marker);
+      if (malformedCurrency === null) {
+        malformedCurrency = currency;
+        malformedMarker = marker;
+      }
     }
   }
 
   return malformedCurrency !== null
-    ? makePriceResult('malformed', null, malformedCurrency)
+    ? makePriceResult('malformed', null, malformedCurrency, malformedMarker ?? undefined)
     : makePriceResult('absent', null, marketCurrency);
 }
 
@@ -448,7 +453,15 @@ export function interpretMarketplaceItem(input: ParseMarketplaceItemInput): Mark
 
   const page = input.page;
   const priceResult = parseMarketplacePrice(page.priceText ?? '', input.fallbackCurrency ?? '');
-  const currency = (priceResult.currency || input.fallbackCurrency || '').toUpperCase().slice(0, 3);
+  let currency = (priceResult.currency || input.fallbackCurrency || '').toUpperCase().slice(0, 3);
+  if (priceResult.marker === '$') {
+    // A bare "$" is ambiguous across dollar currencies, so only a resolved dollar market can identify it.
+    const resolved = (input.fallbackCurrency ?? '').toUpperCase().slice(0, 3);
+    if (!DOLLAR_CURRENCIES.has(resolved)) {
+      return { kind: 'error', code: 'UPSTREAM_ERROR', message: 'The Facebook Marketplace item uses an ambiguous dollar currency that could not be determined.' };
+    }
+    currency = resolved;
+  }
   // An arbitrary configured market must never stand in for an unknown currency.
   if (!currency) return { kind: 'error', code: 'UPSTREAM_ERROR', message: 'The Facebook Marketplace item currency could not be determined.' };
   const sellerUrl = canonicalSellerUrl(page.sellerHref, input.url);

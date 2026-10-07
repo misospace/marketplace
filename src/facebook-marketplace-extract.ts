@@ -230,12 +230,10 @@ export interface ExtractedMarketplaceItem {
 }
 
 export interface ExtractMarketplaceItemOptions {
-  itemPath: string;
   limits: { maxImages: number; maxTextLength: number; maxBodyTextLength: number };
 }
 
 export function extractMarketplaceItem(options: ExtractMarketplaceItemOptions): ExtractedMarketplaceItem {
-  const itemPath = options.itemPath;
   const limits = options.limits;
   const boundedLimit = (value: number): number => Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
   const maxImages = boundedLimit(limits.maxImages);

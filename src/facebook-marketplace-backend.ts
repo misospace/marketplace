@@ -303,7 +303,6 @@ export class FacebookMarketplaceBackend implements MarketplaceBackend {
         });
 
         const extractOptions = {
-          itemPath: MARKETPLACE_ITEM_PATH,
           limits: MARKETPLACE_ITEM_EXTRACT_LIMITS
         };
         let result = await page.evaluate(extractMarketplaceItem, extractOptions);

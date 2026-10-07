@@ -166,7 +166,7 @@ describe.skipIf(!browserAvailable)('Facebook Marketplace fetch', () => {
     expect(listingSchema.parse(listing)).toEqual(listing);
   });
 
-  it('uses a marked USD price instead of the first configured CAD market', async () => {
+  it('uses an explicit USD price instead of the first configured CAD market', async () => {
     synthetic.configure('results-normal.html', 'results-normal.html');
     synthetic.configureItem('item-usd-marker.html');
     const { backend } = createBackend({ markets: [
@@ -176,6 +176,23 @@ describe.skipIf(!browserAvailable)('Facebook Marketplace fetch', () => {
     const listing = await backend.fetch(fetchInput({ id: itemId }), signal());
 
     expect(listing).toMatchObject({ price: 500, currency: 'USD', location: 'Seattle, WA' });
+  });
+
+  it('fails closed on a bare dollar price when the listing location resolves to no market', async () => {
+    synthetic.configure('results-normal.html', 'results-normal.html');
+    synthetic.configureItem('item-bare-dollar-unknown-location.html');
+    const { backend } = createBackend({ markets: [
+      { slug: 'calgary', label: 'Calgary, AB', currency: 'CAD' },
+      { slug: 'seattle', label: 'Seattle, WA', currency: 'USD' }
+    ] });
+
+    // "$500" is ambiguous across the dollar currencies. Bowness is not a configured market, so
+    // there is no evidence for CAD over USD and the fetch must not guess one.
+    await expect(backend.fetch(fetchInput({ id: itemId }), signal())).rejects.toMatchObject({
+      name: 'ProviderError',
+      code: 'UPSTREAM_ERROR',
+      message: expect.stringContaining('currency')
+    });
   });
 
   it('uses a resolved listing location currency when the price has no marker', async () => {

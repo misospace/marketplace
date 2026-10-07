@@ -109,7 +109,7 @@ describe.skipIf(!browserAvailable)('Facebook Marketplace page extraction', () =>
       expect(outcome.kind === 'listings' ? outcome.listings[0] : undefined)
         .toMatchObject({ title: '2014 Honda Civic LX', price: 8500 });
       expect(parseMarketplacePrice(extracted.cards[0]?.text ?? '', 'USD'))
-        .toEqual({ status: 'ok', price: 8500, currency: 'USD' });
+        .toEqual({ status: 'ok', price: 8500, currency: 'USD', marker: '$' });
       expect(parseMarketplacePrice('2018\n123K miles', 'USD'))
         .toEqual({ status: 'absent', price: null, currency: 'USD' });
     }
