@@ -6,9 +6,18 @@ import {
   type Listing
 } from './domain.js';
 import { ProviderError, type MarketplaceBackend } from './backend.js';
-import { extractMarketplacePage, MARKETPLACE_EXTRACT_LIMITS, type ExtractedMarketplacePage } from './facebook-marketplace-extract.js';
 import {
+  extractMarketplaceItem,
+  extractMarketplacePage,
+  MARKETPLACE_EXTRACT_LIMITS,
+  MARKETPLACE_ITEM_EXTRACT_LIMITS,
+  type ExtractedMarketplaceItem,
+  type ExtractedMarketplacePage
+} from './facebook-marketplace-extract.js';
+import {
+  classifyMarketplaceItem,
   classifyMarketplacePage,
+  interpretMarketplaceItem,
   interpretMarketplacePage
 } from './facebook-marketplace-parse.js';
 import {
@@ -17,6 +26,7 @@ import {
   buildMarketplaceSearchUrl,
   resolveFacebookMarket,
   validateFacebookMarkets,
+  resolveMarketplaceItemInput,
   type FacebookMarket
 } from './facebook-marketplace-url.js';
 import { assertFacebookOrigin, FacebookSessionProbe, type FacebookProbeCode } from './facebook.js';
@@ -103,47 +113,7 @@ export class FacebookMarketplaceBackend implements MarketplaceBackend {
     }
     const market = resolution.market;
 
-    let session: Awaited<ReturnType<FacebookSessionProbe['probeSession']>>;
-    try {
-      session = await this.probe.probeSession(signal);
-    } catch (error) {
-      if (signal.aborted) throw signal.reason ?? error;
-      if (error instanceof BrowserUnavailableError) {
-        throw new ProviderError('UPSTREAM_ERROR', 'The browser session is not available.');
-      }
-      if (error instanceof ProviderError) throw error;
-      throw new ProviderError('UPSTREAM_ERROR', 'The Facebook session could not be verified.');
-    }
-
-    if (session.status === 'session_needs_reauth') {
-      // Credentials are submitted only for a plain login requirement. A captcha or checkpoint
-      // already means a human is needed, and re-submitting credentials there is exactly the loop
-      // the manual re-auth flow exists to avoid.
-      const recovery = await this.waitForCredentialLogin(session.code, signal);
-      if (!recovery.recovered) {
-        const code = recovery.code ?? session.code ?? 'SESSION_INVALID';
-        const messages = {
-          LOGIN_REQUIRED: 'Facebook Marketplace requires login.',
-          CAPTCHA_REQUIRED: 'Facebook Marketplace requires a captcha challenge.',
-          SESSION_INVALID: 'The Facebook session requires a security check.'
-        } as const;
-        throw new ProviderError(code, messages[code]);
-      }
-      session = await this.confirmCredentialLogin(signal);
-      if (session.status !== 'session_usable') {
-        const code = session.code ?? 'SESSION_INVALID';
-        const messages = {
-          LOGIN_REQUIRED: 'Facebook Marketplace requires login.',
-          CAPTCHA_REQUIRED: 'Facebook Marketplace requires a captcha challenge.',
-          SESSION_INVALID: 'The Facebook session requires a security check.'
-        } as const;
-        throw new ProviderError(code, messages[code]);
-      }
-    }
-    if (session.status === 'session_unknown') {
-      // The frozen error contract has no "unverified" code; SESSION_INVALID points an operator at the re-auth console, and the message states plainly that verification failed.
-      throw new ProviderError('SESSION_INVALID', 'The Facebook session could not be verified, so the search was not attempted.');
-    }
+    await this.ensureUsableSession(signal);
 
     const searchUrl = assertFacebookOrigin(buildMarketplaceSearchUrl({
       baseUrl: this.probe.baseUrl,
@@ -202,6 +172,50 @@ export class FacebookMarketplaceBackend implements MarketplaceBackend {
     if (outcome.kind === 'error') throw new ProviderError(outcome.code, outcome.message);
     if (outcome.kind === 'empty') return [];
     return [...outcome.listings];
+  }
+
+  private async ensureUsableSession(signal: AbortSignal): Promise<void> {
+    let session: Awaited<ReturnType<FacebookSessionProbe['probeSession']>>;
+    try {
+      session = await this.probe.probeSession(signal);
+    } catch (error) {
+      if (signal.aborted) throw signal.reason ?? error;
+      if (error instanceof BrowserUnavailableError) {
+        throw new ProviderError('UPSTREAM_ERROR', 'The browser session is not available.');
+      }
+      if (error instanceof ProviderError) throw error;
+      throw new ProviderError('UPSTREAM_ERROR', 'The Facebook session could not be verified.');
+    }
+
+    if (session.status === 'session_needs_reauth') {
+      // Credentials are submitted only for a plain login requirement. A captcha or checkpoint
+      // already means a human is needed, and re-submitting credentials there is exactly the loop
+      // the manual re-auth flow exists to avoid.
+      const recovery = await this.waitForCredentialLogin(session.code, signal);
+      if (!recovery.recovered) {
+        const code = recovery.code ?? session.code ?? 'SESSION_INVALID';
+        const messages = {
+          LOGIN_REQUIRED: 'Facebook Marketplace requires login.',
+          CAPTCHA_REQUIRED: 'Facebook Marketplace requires a captcha challenge.',
+          SESSION_INVALID: 'The Facebook session requires a security check.'
+        } as const;
+        throw new ProviderError(code, messages[code]);
+      }
+      session = await this.confirmCredentialLogin(signal);
+      if (session.status !== 'session_usable') {
+        const code = session.code ?? 'SESSION_INVALID';
+        const messages = {
+          LOGIN_REQUIRED: 'Facebook Marketplace requires login.',
+          CAPTCHA_REQUIRED: 'Facebook Marketplace requires a captcha challenge.',
+          SESSION_INVALID: 'The Facebook session requires a security check.'
+        } as const;
+        throw new ProviderError(code, messages[code]);
+      }
+    }
+    if (session.status === 'session_unknown') {
+      // The frozen error contract has no "unverified" code; SESSION_INVALID points an operator at the re-auth console, and the message states plainly that verification failed.
+      throw new ProviderError('SESSION_INVALID', 'The Facebook session could not be verified, so the request was not attempted.');
+    }
   }
 
   /**
@@ -271,9 +285,63 @@ export class FacebookMarketplaceBackend implements MarketplaceBackend {
     }
   }
 
-  fetch(_input: ReturnType<typeof fetchInputSchema.parse>, _signal: AbortSignal): Listing | null {
-    // A null result would incorrectly report an unimplemented operation as NOT_FOUND.
-    throw new ProviderError('UPSTREAM_ERROR', 'Listing fetch is not implemented for the Facebook backend.');
+  async fetch(input: ReturnType<typeof fetchInputSchema.parse>, signal: AbortSignal): Promise<Listing | null> {
+    if (signal.aborted) throw signal.reason ?? new Error('Browser operation aborted');
+
+    const resolved = resolveMarketplaceItemInput(input, this.probe.baseUrl);
+    if (!resolved) return null;
+
+    await this.ensureUsableSession(signal);
+
+    let extracted: ExtractedMarketplaceItem;
+    try {
+      extracted = await this.browser.runExclusive(signal, async (page, taskSignal) => {
+        await page.goto(resolved.url, {
+          waitUntil: 'domcontentloaded',
+          timeout: this.navigationTimeoutMs,
+          signal: taskSignal
+        });
+
+        const extractOptions = {
+          limits: MARKETPLACE_ITEM_EXTRACT_LIMITS
+        };
+        let result = await page.evaluate(extractMarketplaceItem, extractOptions);
+        const deadline = Date.now() + this.settleTimeoutMs;
+        while (classifyMarketplaceItem(result) === 'unknown' && Date.now() < deadline && !taskSignal.aborted) {
+          await sleepUntilAbort(200, taskSignal);
+          if (!taskSignal.aborted) {
+            // Playwright page.evaluate cannot be cancelled directly; the extracted page work is bounded.
+            result = await page.evaluate(extractMarketplaceItem, extractOptions);
+          }
+        }
+        if (taskSignal.aborted) throw taskSignal.reason ?? new Error('Browser operation aborted');
+        return result;
+      });
+    } catch (error) {
+      if (signal.aborted) throw signal.reason ?? error;
+      if (error instanceof errors.TimeoutError) {
+        throw new ProviderError('TIMEOUT', 'The Facebook Marketplace listing page did not load in time.');
+      }
+      if (error instanceof ProviderError) throw error;
+      if (error instanceof BrowserUnavailableError) {
+        throw new ProviderError('UPSTREAM_ERROR', 'The browser session is not available.');
+      }
+      this.logger.error('Facebook Marketplace fetch failed:', error instanceof Error ? error.name : 'UnknownError');
+      throw new ProviderError('UPSTREAM_ERROR', 'The Facebook Marketplace listing could not be fetched.');
+    }
+
+    const locationMarket = extracted.locationText?.trim()
+      ? resolveFacebookMarket(extracted.locationText, this.markets)
+      : null;
+    const outcome = interpretMarketplaceItem({
+      page: extracted,
+      id: resolved.id,
+      url: resolved.url,
+      ...(locationMarket?.ok ? { fallbackCurrency: locationMarket.market.currency } : {})
+    });
+    if (outcome.kind === 'error') throw new ProviderError(outcome.code, outcome.message);
+    if (outcome.kind === 'unavailable') return null;
+    return outcome.listing;
   }
 }
 

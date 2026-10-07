@@ -1,5 +1,3 @@
-import { createServer, type Server } from 'node:http';
-import { readFileSync } from 'node:fs';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -9,32 +7,13 @@ import { BrowserSessionManager } from '../src/browser.js';
 import { ProviderError } from '../src/backend.js';
 import { FacebookSessionProbe } from '../src/facebook.js';
 import { FacebookMarketplaceBackend } from '../src/facebook-marketplace-backend.js';
-import { searchInputSchema, fetchInputSchema } from '../src/domain.js';
+import { searchInputSchema } from '../src/domain.js';
+import { startSyntheticServer, waitForRequest, type SyntheticServer } from './helpers/synthetic-facebook-server.js';
 
 const browserAvailable = existsSync(chromium.executablePath());
 if (!browserAvailable && process.env.REQUIRE_BROWSER_TESTS === '1') {
   throw new Error('Chromium is required for browser tests at ' + chromium.executablePath());
 }
-
-const fixtureNames = [
-  'results-normal.html', 'results-multi-currency.html', 'results-vehicle.html', 'results-sponsored.html',
-  'results-missing-price.html', 'results-sold-pending.html', 'results-duplicate.html', 'results-malformed.html',
-  'results-all-malformed.html', 'no-results.html', 'layout-changed.html', 'login.html', 'checkpoint.html',
-  'captcha.html', 'rate-limited.html'
-] as const;
-type FixtureName = typeof fixtureNames[number];
-const fixtures = new Map<FixtureName, string>(fixtureNames.map((name) => [
-  name,
-  readFileSync(new URL(`./fixtures/facebook-marketplace/${name}`, import.meta.url), 'utf8')
-]));
-
-type SyntheticServer = {
-  server: Server;
-  origin: string;
-  requests: string[];
-  configure(probeFile: FixtureName, searchFile: FixtureName, hangSearch?: boolean, probeHtml?: string): void;
-  close(): Promise<void>;
-};
 
 let synthetic: SyntheticServer;
 const managers: BrowserSessionManager[] = [];
@@ -235,14 +214,6 @@ describe.skipIf(!browserAvailable)('Facebook Marketplace backend', () => {
     browser.endInteractive();
   });
 
-  it('reports Facebook fetch as explicitly unimplemented', async () => {
-    synthetic.configure('results-normal.html', 'results-normal.html');
-    const { backend } = createBackend();
-    const input = fetchInputSchema.parse({ id: '100000000000001' });
-    await expectProviderError(Promise.resolve().then(() => backend.fetch(input, new AbortController().signal)), 'UPSTREAM_ERROR');
-    expect(synthetic.requests).toEqual([]);
-  });
-
   it('validates constructor timeout and card bounds', () => {
     const { backend, browser } = createBackend();
     const probe = new FacebookSessionProbe({ browser, baseUrl: synthetic.origin });
@@ -254,64 +225,3 @@ describe.skipIf(!browserAvailable)('Facebook Marketplace backend', () => {
     expect(() => new FacebookMarketplaceBackend({ browser: {} as BrowserSessionManager, probe })).toThrow(TypeError);
   });
 });
-
-async function startSyntheticServer(): Promise<SyntheticServer> {
-  const requests: string[] = [];
-  let probeFile: FixtureName = 'results-normal.html';
-  let probeHtml: string | undefined;
-  let searchFile: FixtureName = 'results-normal.html';
-  let hangSearch = false;
-  const server = createServer((request, response) => {
-    const pathname = new URL(request.url ?? '/', 'http://127.0.0.1').pathname;
-    requests.push(request.url ?? pathname);
-    if (hangSearch && /^\/marketplace\/[^/]+\/search\/$/.test(pathname)) return;
-    let fixture: string | undefined;
-    if (pathname === '/marketplace/') fixture = probeHtml ?? fixtures.get(probeFile);
-    else if (/^\/marketplace\/[^/]+\/search\/$/.test(pathname)) fixture = fixtures.get(searchFile);
-    if (!fixture) {
-      response.writeHead(404, { 'content-type': 'text/plain' }).end('missing synthetic route');
-      return;
-    }
-    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-    response.end(fixture);
-  });
-  await new Promise<void>((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(0, '127.0.0.1', resolve);
-  });
-  const address = server.address();
-  if (!address || typeof address === 'string') throw new Error('Expected a TCP address');
-  return {
-    server,
-    origin: `http://127.0.0.1:${address.port}`,
-    requests,
-    configure: (nextProbeFile, nextSearchFile, nextHangSearch = false, nextProbeHtml) => {
-      probeFile = nextProbeFile;
-      probeHtml = nextProbeHtml;
-      searchFile = nextSearchFile;
-      hangSearch = nextHangSearch;
-      requests.length = 0;
-    },
-    close: async () => {
-      server.closeAllConnections();
-      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
-    }
-  };
-}
-
-function waitForRequest(pathPrefix: string): Promise<void> {
-  if (synthetic.requests.some((request) => request.startsWith(pathPrefix))) return Promise.resolve();
-  return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      clearInterval(poll);
-      reject(new Error(`Timed out waiting for synthetic request ${pathPrefix}`));
-    }, 5_000);
-    const poll = setInterval(() => {
-      if (synthetic.requests.some((request) => request.startsWith(pathPrefix))) {
-        clearTimeout(timeout);
-        clearInterval(poll);
-        resolve();
-      }
-    }, 10);
-  });
-}

@@ -1,13 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import {
+  classifyMarketplaceItem,
   classifyMarketplacePage,
+  interpretMarketplaceItem,
   interpretMarketplacePage,
   parseMarketplacePage,
   parseMarketplacePrice,
   type MarketplacePageKind,
   type ParseMarketplaceInput
 } from '../src/facebook-marketplace-parse.js';
-import type { ExtractedListingCard, ExtractedMarketplacePage } from '../src/facebook-marketplace-extract.js';
+import type { ExtractedListingCard, ExtractedMarketplaceItem, ExtractedMarketplacePage } from '../src/facebook-marketplace-extract.js';
+import { listingSchema } from '../src/domain.js';
 import { DEFAULT_FACEBOOK_MARKETS } from '../src/facebook-marketplace-url.js';
 
 const market = DEFAULT_FACEBOOK_MARKETS[0]!;
@@ -70,7 +73,7 @@ describe('Marketplace price parsing', () => {
     ['1.234,56 €', 'USD', 1234.56, 'EUR'],
     ['FREE', 'USD', 0, 'USD']
   ])('parses %s', (text, currency, price, expectedCurrency) => {
-    expect(parseMarketplacePrice(text, currency)).toEqual({ status: 'ok', price, currency: expectedCurrency });
+    expect(parseMarketplacePrice(text, currency)).toMatchObject({ status: 'ok', price, currency: expectedCurrency });
   });
 
   it.each(['$1,2,3', '-$100', '$1k', '$1e3', '$1.5k', '$1x', '$12.345', '$1.500', '1,500 €'])('marks malformed token %s', (text) => {
@@ -82,7 +85,7 @@ describe('Marketplace price parsing', () => {
     ['1.500 €', 'USD', 1500, 'EUR'],
     ['$1,234.56', 'USD', 1234.56, 'USD']
   ])('parses locale-aware grouped amount %s', (text, marketCurrency, price, currency) => {
-    expect(parseMarketplacePrice(text, marketCurrency)).toEqual({ status: 'ok', price, currency });
+    expect(parseMarketplacePrice(text, marketCurrency)).toMatchObject({ status: 'ok', price, currency });
   });
 
   it.each(['$abc', '$', 'USD', '3 krabs', 'tikkr'])('treats non-adjacent currency prose %s as absent', (text) => {
@@ -90,7 +93,7 @@ describe('Marketplace price parsing', () => {
   });
 
   it('continues past malformed price markers to find a later valid price', () => {
-    expect(parseMarketplacePrice('$1,2,3\n$200', 'USD')).toEqual({ status: 'ok', price: 200, currency: 'USD' });
+    expect(parseMarketplacePrice('$1,2,3\n$200', 'USD')).toEqual({ status: 'ok', price: 200, currency: 'USD', marker: '$' });
   });
 
   it.each(['2018', '123K miles', '3 mi', 'Free local pickup available', ''])('does not infer a price from %s', (text) => {
@@ -102,6 +105,17 @@ describe('Marketplace price parsing', () => {
     expect(parseMarketplacePrice('FREE delivery, was $50, now $30', 'USD').price).toBe(50);
     expect(parseMarketplacePrice('$99', 'CAD').currency).toBe('CAD');
     expect(parseMarketplacePrice('$99', 'EUR').currency).toBe('USD');
+  });
+
+  it('reports the matched price marker without changing parsed currency', () => {
+    expect(parseMarketplacePrice('$99', 'CAD')).toMatchObject({ status: 'ok', price: 99, currency: 'CAD', marker: '$' });
+    expect(parseMarketplacePrice('$1,2,3', 'CAD')).toMatchObject({ status: 'malformed', marker: '$' });
+    expect(parseMarketplacePrice('Free', 'CAD')).not.toHaveProperty('marker');
+    expect(parseMarketplacePrice('500', '')).not.toHaveProperty('marker');
+  });
+
+  it('leaves the currency empty for a markerless number without market context', () => {
+    expect(parseMarketplacePrice('500', '')).toEqual({ status: 'absent', price: null, currency: '' });
   });
 });
 
@@ -246,6 +260,186 @@ describe('Marketplace result parsing', () => {
     expect(() => parseMarketplacePage(input([], { limit: 0 }))).toThrow(RangeError);
     expect(() => parseMarketplacePage(input([], { minPrice: -1 }))).toThrow(RangeError);
     expect(() => parseMarketplacePage(input([], { maxPrice: Infinity }))).toThrow(RangeError);
+  });
+});
+
+function itemPage(overrides: Partial<ExtractedMarketplaceItem> = {}): ExtractedMarketplaceItem {
+  return {
+    url: 'https://www.facebook.com/marketplace/item/1234567890/',
+    signals: cleanSignals,
+    hasUnavailableNotice: false,
+    title: 'Vintage bicycle',
+    priceText: '$450',
+    locationText: 'Brooklyn, NY',
+    descriptionText: 'Great condition',
+    stateText: '',
+    bodyText: '',
+    imageUrls: [],
+    sellerHref: null,
+    sellerName: null,
+    timeDateTime: null,
+    ...overrides
+  };
+}
+
+function itemInput(pageValue: ExtractedMarketplaceItem = itemPage(), fallbackCurrency: string | null = 'USD') {
+  return {
+    page: pageValue,
+    id: '1234567890',
+    url: 'https://www.facebook.com/marketplace/item/1234567890/',
+    ...(fallbackCurrency !== null ? { fallbackCurrency } : {})
+  };
+}
+
+describe('Marketplace item parsing', () => {
+  it.each([
+    [{ hasLoginForm: true }, 'login', 'LOGIN_REQUIRED'],
+    [{ hasCaptcha: true }, 'captcha', 'CAPTCHA_REQUIRED'],
+    [{ hasCheckpoint: true }, 'checkpoint', 'SESSION_INVALID'],
+    [{ hasRateLimitNotice: true }, 'rate_limited', 'RATE_LIMITED']
+  ] as const)('classifies and interprets interstitial flags', (signals, kind, code) => {
+    const pageValue = itemPage({ signals: { ...cleanSignals, ...signals } });
+    expect(classifyMarketplaceItem(pageValue)).toBe(kind);
+    expect(interpretMarketplaceItem(itemInput(pageValue))).toMatchObject({ kind: 'error', code });
+  });
+
+  it('classifies checkpoint before login when both signals are present', () => {
+    const pageValue = itemPage({ signals: { ...cleanSignals, hasLoginForm: true, hasCheckpoint: true } });
+    expect(classifyMarketplaceItem(pageValue)).toBe('checkpoint');
+    expect(interpretMarketplaceItem(itemInput(pageValue))).toMatchObject({ kind: 'error', code: 'SESSION_INVALID' });
+  });
+
+  it('classifies a title-less page with an unavailable notice as unavailable', () => {
+    const pageValue = itemPage({ title: null, hasUnavailableNotice: true });
+    expect(classifyMarketplaceItem(pageValue)).toBe('unavailable');
+    expect(interpretMarketplaceItem(itemInput(pageValue))).toEqual({ kind: 'unavailable' });
+  });
+
+  it('returns a complete removed listing with its removed state', () => {
+    const outcome = interpretMarketplaceItem(itemInput(itemPage({ stateText: 'Vintage bicycle\n$450\nRemoved' })));
+    expect(outcome).toMatchObject({ kind: 'listing', listing: { title: 'Vintage bicycle', price: 450, location: 'Brooklyn, NY', state: 'removed' } });
+  });
+
+  it('keeps a rendered listing even when its description mentions unavailability', () => {
+    // The notice regex runs over the whole page, and a description is part of the page, so the
+    // title must win: a seller writing "delivery is not available" must not hide a live listing.
+    const pageValue = itemPage({
+      title: 'Vintage bicycle',
+      hasUnavailableNotice: true,
+      descriptionText: 'Pickup only, delivery is not available.'
+    });
+    expect(classifyMarketplaceItem(pageValue)).toBe('item');
+    expect(interpretMarketplaceItem(itemInput(pageValue))).toMatchObject({
+      kind: 'listing',
+      listing: { state: 'active' }
+    });
+  });
+
+  it('drops an off-origin seller link instead of carrying it into the listing', () => {
+    const pageValue = itemPage({ sellerHref: '//attacker.example/marketplace/profile/123/', sellerName: 'Seller' });
+    const outcome = interpretMarketplaceItem(itemInput(pageValue));
+    expect(outcome).toMatchObject({ kind: 'listing', listing: { seller: { name: 'Seller' } } });
+    expect(JSON.stringify(outcome)).not.toContain('attacker.example');
+  });
+
+  it('fails closed on currency when the price has no marker and the location resolves to no market', () => {
+    // The location is present and parseable, so this can only fail on the currency rule; asserting
+    // the message keeps it from silently passing via the location check instead.
+    const pageValue = itemPage({ priceText: '500', locationText: 'Unmapped Town, ZZ' });
+    const outcome = interpretMarketplaceItem({ ...itemInput(pageValue), fallbackCurrency: undefined });
+    expect(outcome).toMatchObject({ kind: 'error', code: 'UPSTREAM_ERROR' });
+    expect(JSON.stringify(outcome)).toContain('currency');
+  });
+
+  it('requires a resolved dollar market for a bare dollar marker', () => {
+    const pageValue = itemPage({ priceText: '$500' });
+    // A resolved dollar market identifies the bare marker.
+    expect(interpretMarketplaceItem({ ...itemInput(pageValue), fallbackCurrency: 'CAD' })).toMatchObject({
+      kind: 'listing',
+      listing: { price: 500, currency: 'CAD' }
+    });
+    // A non-dollar market, or no market at all, is not evidence for any dollar currency.
+    expect(interpretMarketplaceItem({ ...itemInput(pageValue), fallbackCurrency: 'EUR' })).toMatchObject({
+      kind: 'error',
+      code: 'UPSTREAM_ERROR'
+    });
+    expect(interpretMarketplaceItem({ ...itemInput(pageValue), fallbackCurrency: undefined })).toMatchObject({
+      kind: 'error',
+      code: 'UPSTREAM_ERROR'
+    });
+  });
+
+  it('accepts explicit currency markers with no resolved market', () => {
+    const cases = [['US$500', 'USD'], ['CA$500', 'CAD'], ['C$500', 'CAD'], ['€500', 'EUR'], ['£500', 'GBP'], ['500 GBP', 'GBP']] as const;
+    for (const [priceText, currency] of cases) {
+      const outcome = interpretMarketplaceItem({
+        ...itemInput(itemPage({ priceText })),
+        fallbackCurrency: undefined
+      });
+      expect(outcome).toMatchObject({ kind: 'listing', listing: { price: 500, currency } });
+    }
+  });
+
+  it('fails closed for an unknown layout', () => {
+    const pageValue = itemPage({ title: null });
+    expect(classifyMarketplaceItem(pageValue)).toBe('unknown');
+    expect(interpretMarketplaceItem(itemInput(pageValue))).toMatchObject({ kind: 'error', code: 'UPSTREAM_ERROR' });
+  });
+
+  it('does not emit a partial listing when location is missing', () => {
+    expect(interpretMarketplaceItem(itemInput(itemPage({ locationText: null }))))
+      .toMatchObject({ kind: 'error', code: 'UPSTREAM_ERROR' });
+  });
+
+  it('parses a listing, applies domain validation, and uses location currency for an absent price', () => {
+    const outcome = interpretMarketplaceItem(itemInput(itemPage({ priceText: null, imageUrls: [
+      'https://images.example.invalid/one.jpg', 'https://images.example.invalid/two.jpg'
+    ], sellerHref: '/marketplace/profile/123/', sellerName: 'Sample Seller' }), 'CAD'));
+    expect(outcome.kind).toBe('listing');
+    if (outcome.kind !== 'listing') return;
+    expect(outcome.listing).toMatchObject({
+      price: null,
+      currency: 'CAD',
+      seller: { name: 'Sample Seller', url: 'https://www.facebook.com/marketplace/profile/123/' }
+    });
+    expect(listingSchema.parse(outcome.listing)).toEqual(outcome.listing);
+  });
+
+  it('fails closed when currency cannot be determined', () => {
+    expect(interpretMarketplaceItem(itemInput(itemPage({ priceText: null }), null)))
+      .toMatchObject({ kind: 'error', code: 'UPSTREAM_ERROR', message: 'The Facebook Marketplace item currency could not be determined.' });
+  });
+
+  it('uses active only for a rendered fetch item and sold when the item region says Sold', () => {
+    const active = interpretMarketplaceItem(itemInput());
+    const sold = interpretMarketplaceItem(itemInput(itemPage({ stateText: 'Vintage bicycle\n$450\nSold' })));
+    expect(active.kind === 'listing' ? active.listing.state : null).toBe('active');
+    expect(sold.kind === 'listing' ? sold.listing.state : null).toBe('sold');
+  });
+
+  it('truncates descriptions and caps images at the schema limit', () => {
+    const imageUrls = Array.from({ length: 9 }, (_, index) => `https://images.example.invalid/${index}.jpg`);
+    const outcome = interpretMarketplaceItem(itemInput(itemPage({ descriptionText: 'Long description '.repeat(30), imageUrls })));
+    expect(outcome.kind).toBe('listing');
+    if (outcome.kind !== 'listing') return;
+    expect(outcome.listing.description).toHaveLength(280);
+    expect(outcome.listing.images).toHaveLength(6);
+    expect(listingSchema.parse(outcome.listing)).toEqual(outcome.listing);
+  });
+
+  it('strips disclosure labels and accepts an offset time without inventing one', () => {
+    const outcome = interpretMarketplaceItem(itemInput(itemPage({
+      descriptionText: 'A useful item See more',
+      timeDateTime: '2026-09-14T10:30:00-07:00'
+    })));
+    expect(outcome.kind === 'listing' ? outcome.listing.description : null).toBe('A useful item');
+    expect(outcome.kind === 'listing' ? outcome.listing.posted_at : null).toBe('2026-09-14T10:30:00-07:00');
+    expect(outcome.kind === 'listing' ? outcome.listing.updated_at : null).toBeNull();
+  });
+
+  it('rejects invalid listing fields as a typed upstream error', () => {
+    expect(interpretMarketplaceItem(itemInput(itemPage({ imageUrls: ['javascript:alert(1)'] }))))
+      .toMatchObject({ kind: 'error', code: 'UPSTREAM_ERROR' });
   });
 });
 

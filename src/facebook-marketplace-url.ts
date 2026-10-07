@@ -158,6 +158,40 @@ export function parseMarketplaceItemId(href: string): string | null {
   return id && /^\d{5,20}$/.test(id) ? id : null;
 }
 
+export interface ResolvedMarketplaceItemInput { id: string; url: string; }
+
+/**
+ * Resolves caller input to a URL derived only from the configured base. The supplied URL is used
+ * only to validate its origin and extract an item id, making caller-controlled navigation impossible.
+ */
+export function resolveMarketplaceItemInput(
+  input: { id?: string; url?: string },
+  baseUrl: string
+): ResolvedMarketplaceItemInput | null {
+  const base = parseHttpBase(baseUrl);
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) return null;
+  const hasId = input.id !== undefined;
+  const hasUrl = input.url !== undefined;
+  if (hasId === hasUrl) return null;
+
+  let id: string | null;
+  if (hasId) {
+    id = typeof input.id === 'string' && /^\d{5,20}$/.test(input.id) ? input.id : null;
+  } else {
+    if (typeof input.url !== 'string') return null;
+    let suppliedUrl: URL;
+    try {
+      suppliedUrl = new URL(input.url);
+    } catch {
+      return null;
+    }
+    if (suppliedUrl.origin !== base.origin) return null;
+    id = parseMarketplaceItemId(suppliedUrl.href);
+  }
+  if (!id) return null;
+  return { id, url: buildMarketplaceItemUrl(baseUrl, id) };
+}
+
 export function buildMarketplaceItemUrl(baseUrl: string, id: string): string {
   if (typeof id !== 'string' || !/^\d{5,20}$/.test(id)) throw new TypeError('Marketplace item id is invalid');
   const base = parseHttpBase(baseUrl);

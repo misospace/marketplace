@@ -206,3 +206,153 @@ export function extractMarketplacePage(options: ExtractMarketplaceOptions): Extr
 
   return { url: location.href.slice(0, 2048), signals, cards };
 }
+
+export const MARKETPLACE_ITEM_EXTRACT_LIMITS = {
+  maxImages: 6,
+  maxTextLength: 600,
+  maxBodyTextLength: 20000
+} as const;
+
+export interface ExtractedMarketplaceItem {
+  url: string;
+  signals: ExtractedMarketplaceSignals;
+  hasUnavailableNotice: boolean;
+  title: string | null;
+  priceText: string | null;
+  locationText: string | null;
+  descriptionText: string | null;
+  stateText: string | null;
+  bodyText: string;
+  imageUrls: string[];
+  sellerHref: string | null;
+  sellerName: string | null;
+  timeDateTime: string | null;
+}
+
+export interface ExtractMarketplaceItemOptions {
+  limits: { maxImages: number; maxTextLength: number; maxBodyTextLength: number };
+}
+
+export function extractMarketplaceItem(options: ExtractMarketplaceItemOptions): ExtractedMarketplaceItem {
+  const limits = options.limits;
+  const boundedLimit = (value: number): number => Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
+  const maxImages = boundedLimit(limits.maxImages);
+  const maxTextLength = boundedLimit(limits.maxTextLength);
+  const maxBodyTextLength = boundedLimit(limits.maxBodyTextLength);
+  const text = (element: Element | null, maximum = maxTextLength): string | null => {
+    if (!element) return null;
+    const innerText = (element as HTMLElement).innerText;
+    const raw = typeof innerText === 'string' && innerText.length > 0 ? innerText : (element.textContent ?? '');
+    const normalized = raw.replace(/\s+/g, ' ').trim().slice(0, maximum);
+    return normalized || null;
+  };
+  const lastH1s = document.querySelectorAll('h1');
+  const heading = lastH1s.length > 0 ? lastH1s[lastH1s.length - 1] ?? null : null;
+  let priceElement = heading?.nextElementSibling ?? null;
+  if (!priceElement) priceElement = document.querySelector('h1 + *');
+  const title = text(heading);
+  const priceText = text(priceElement);
+  const bodyRoot = document.body ?? document.documentElement;
+  const bodyInnerText = (bodyRoot as HTMLElement).innerText;
+  const rawBodyText = typeof bodyInnerText === 'string' && bodyInnerText.length > 0 ? bodyInnerText : (bodyRoot.textContent ?? '');
+  const bodyText = rawBodyText.replace(/\s+/g, ' ').trim().slice(0, maxBodyTextLength);
+  const bodyLines = rawBodyText.split('\n').map((line) => line.replace(/\s+/g, ' ').trim()).filter(Boolean);
+
+  let locationText: string | null = null;
+  const locationPhrase = /location is approximate/ig;
+  for (const span of document.querySelectorAll('span')) {
+    if (!/location is approximate/i.test(span.textContent ?? '')) continue;
+    let current: Element | null = span;
+    for (let level = 0; level < 10 && current; level += 1) {
+      const candidate = (current.textContent ?? '').replace(locationPhrase, '').replace(/·/g, ' ').replace(/\s+/g, ' ').trim();
+      if (candidate) {
+        locationText = candidate.slice(0, maxTextLength);
+        break;
+      }
+      current = current.parentElement;
+    }
+    if (locationText) break;
+  }
+  if (!locationText) {
+    const locationPattern = /^[A-Za-z .'-]+,\s*[A-Z]{2}$/;
+    locationText = bodyLines.find((line) => locationPattern.test(line))?.slice(0, maxTextLength) ?? null;
+  }
+
+  let descriptionText: string | null = null;
+  const conditionLabel = Array.from(document.querySelectorAll('span'))
+    .find((span) => (span.textContent ?? '').trim() === 'Condition');
+  if (conditionLabel) {
+    const siblingTexts: string[] = [];
+    let current: Element | null = conditionLabel;
+    for (let level = 0; level < 16 && current && siblingTexts.length < 2; level += 1) {
+      let sibling = current.nextElementSibling;
+      while (sibling && siblingTexts.length < 2) {
+        const siblingText = text(sibling);
+        if (siblingText) siblingTexts.push(siblingText);
+        sibling = sibling.nextElementSibling;
+      }
+      current = current.parentElement;
+    }
+    descriptionText = siblingTexts[1] ?? null;
+    if (!descriptionText) {
+      let ancestor: Element | null = conditionLabel;
+      for (let level = 0; level < 16 && ancestor && !descriptionText; level += 1) {
+        if (ancestor.tagName.toLowerCase() === 'ul' && ancestor.nextElementSibling) {
+          descriptionText = text(ancestor.nextElementSibling);
+        }
+        ancestor = ancestor.parentElement;
+      }
+    }
+  }
+
+  const sellerAnchors = Array.from(document.querySelectorAll('a[href*="/marketplace/profile"]'));
+  const fallbackSellerAnchors = sellerAnchors.length > 0 ? [] : Array.from(document.querySelectorAll('a[href*="/profile"]'));
+  const seller = (sellerAnchors.length > 0 ? sellerAnchors : fallbackSellerAnchors).at(-1) ?? null;
+  const sellerHref = seller?.getAttribute('href')?.slice(0, 2048) ?? null;
+  const sellerName = text(seller);
+  const imageRoot = document.querySelector('main') ?? document;
+  const imageUrls: string[] = [];
+  const seenImages = new Set<string>();
+  for (const image of imageRoot.querySelectorAll('img[src]')) {
+    if (maxImages <= 0) break;
+    const src = (image as HTMLImageElement).src.trim();
+    if (!src || /^data:/i.test(src) || seenImages.has(src)) continue;
+    seenImages.add(src);
+    imageUrls.push(src.slice(0, 2048));
+    if (imageUrls.length >= maxImages) break;
+  }
+  const timeDateTime = document.querySelector('time[datetime]')?.getAttribute('datetime')?.trim().slice(0, maxTextLength) ?? null;
+  const stateElement = heading?.parentElement ?? null;
+  const stateInnerText = stateElement ? (stateElement as HTMLElement).innerText : null;
+  const stateRawText = typeof stateInnerText === 'string' && stateInnerText.length > 0
+    ? stateInnerText
+    : (stateElement?.textContent ?? '');
+  const stateText = stateRawText.split('\n').map((line) => line.replace(/\s+/g, ' ').trim()).filter(Boolean).join('\n').slice(0, maxTextLength) || null;
+  // Keep these selectors aligned with the search/session probe; this page function cannot use module scope.
+  const signals: ExtractedMarketplaceSignals = {
+    hasLoginForm: document.querySelector('input[type="password"], form[action*="/login"], input[name="pass"]') !== null,
+    hasCheckpoint: document.querySelector('form[action*="checkpoint"], [data-testid*="checkpoint"]') !== null
+      || /security check|confirm your identity|unusual activity/i.test(bodyText),
+    hasCaptcha: document.querySelector('iframe[src*="captcha" i], [id*="captcha" i], [data-testid*="captcha" i]') !== null
+      || /captcha|i'?m not a robot|verify you are a human/i.test(bodyText),
+    // Rate-limit detection is deliberately conservative and text-based.
+    hasRateLimitNotice: /you'?re temporarily blocked|temporarily blocked|we limit how often|too many requests|try again later|please try again later/i.test(bodyText),
+    hasNoResultsNotice: /no results|no listings|no items found|nothing found|try a different search|no marketplace listings/i.test(bodyText)
+  };
+
+  return {
+    url: location.href.slice(0, 2048),
+    signals,
+    hasUnavailableNotice: /no longer available|isn't available|is not available|content not found|listing was removed|listing (?:has )?expired/i.test(bodyText),
+    title,
+    priceText,
+    locationText,
+    descriptionText,
+    stateText,
+    bodyText,
+    imageUrls,
+    sellerHref,
+    sellerName,
+    timeDateTime
+  };
+}

@@ -2,7 +2,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { chromium, type Browser, type Page } from 'playwright';
 import { MARKETPLACE_ITEM_PATH } from '../src/facebook-marketplace-url.js';
-import { extractMarketplacePage, MARKETPLACE_EXTRACT_LIMITS } from '../src/facebook-marketplace-extract.js';
+import { extractMarketplaceItem, extractMarketplacePage, MARKETPLACE_EXTRACT_LIMITS, MARKETPLACE_ITEM_EXTRACT_LIMITS } from '../src/facebook-marketplace-extract.js';
 import { classifyMarketplacePage, interpretMarketplacePage, parseMarketplacePage, parseMarketplacePrice } from '../src/facebook-marketplace-parse.js';
 
 const browserAvailable = existsSync(chromium.executablePath());
@@ -109,7 +109,7 @@ describe.skipIf(!browserAvailable)('Facebook Marketplace page extraction', () =>
       expect(outcome.kind === 'listings' ? outcome.listings[0] : undefined)
         .toMatchObject({ title: '2014 Honda Civic LX', price: 8500 });
       expect(parseMarketplacePrice(extracted.cards[0]?.text ?? '', 'USD'))
-        .toEqual({ status: 'ok', price: 8500, currency: 'USD' });
+        .toEqual({ status: 'ok', price: 8500, currency: 'USD', marker: '$' });
       expect(parseMarketplacePrice('2018\n123K miles', 'USD'))
         .toEqual({ status: 'absent', price: null, currency: 'USD' });
     }
@@ -197,6 +197,61 @@ describe.skipIf(!browserAvailable)('Facebook Marketplace page extraction', () =>
     expect(extracted.cards).toHaveLength(1);
     expect(extracted.signals.hasRateLimitNotice).toBe(true);
     expect(classifyMarketplacePage(extracted)).toBe('rate_limited');
+  });
+
+  it.each([
+    ['item-normal.html', { title: 'Vintage oak writing desk', priceText: 'US$180', locationText: 'Portland, OR', descriptionText: 'Solid wood desk with a smooth finish. Pickup near the park.', sellerName: 'Sample Seller', timeDateTime: '2026-09-14T10:30:00-07:00' }],
+    ['item-sold.html', { title: 'Vintage oak writing desk' }],
+    ['item-unavailable.html', { hasUnavailableNotice: true, title: null }],
+    ['item-login.html', { signals: { hasLoginForm: true } }],
+    ['item-unknown-layout.html', { title: 'Unrecognised listing structure', locationText: null }],
+    ['item-flex.html', { title: 'Flexible layout side table', descriptionText: 'Handmade side table with a sealed walnut top.', locationText: 'Austin, TX' }],
+    ['item-missing-price.html', { title: 'Unpriced handmade stool' }]
+  ] as const)('extracts item fields from %s', async (file, expected) => {
+    const html = readFileSync(new URL(`./fixtures/facebook-marketplace/${file}`, import.meta.url), 'utf8');
+    await page.setContent(html, { waitUntil: 'domcontentloaded' });
+    const extracted = await page.evaluate(extractMarketplaceItem, {
+      itemPath: MARKETPLACE_ITEM_PATH,
+      limits: MARKETPLACE_ITEM_EXTRACT_LIMITS
+    });
+    expect(extracted).toMatchObject(expected);
+    if (file === 'item-normal.html') {
+      expect(extracted.imageUrls).toHaveLength(2);
+      expect(extracted.sellerHref).toBe('/marketplace/profile/100000000000901/');
+    }
+    if (file === 'item-sold.html') expect(extracted.stateText).toContain('Sold');
+    if (file === 'item-missing-price.html') expect(extracted.priceText).toBeNull();
+    if (file === 'item-flex.html') expect(extracted.sellerName).toBe('Another Sample Seller');
+  });
+
+  it('returns null fields without throwing when there is no item markup', async () => {
+    await page.setContent('<!doctype html><html><body><p>Unrelated content only</p></body></html>', { waitUntil: 'domcontentloaded' });
+    const extracted = await page.evaluate(extractMarketplaceItem, {
+      itemPath: MARKETPLACE_ITEM_PATH,
+      limits: MARKETPLACE_ITEM_EXTRACT_LIMITS
+    });
+    expect(extracted).toMatchObject({
+      title: null,
+      priceText: null,
+      locationText: null,
+      descriptionText: null,
+      stateText: null,
+      sellerHref: null,
+      sellerName: null,
+      timeDateTime: null,
+      imageUrls: []
+    });
+  });
+
+  it('caps item extraction fields at configured limits', async () => {
+    await page.setContent('<!doctype html><html><body><main><h1>' + 'T'.repeat(700) + '</h1><div>$1</div>' + Array.from({ length: 8 }, (_, index) => `<img src="https://images.example.invalid/${index}.jpg">`).join('') + '</main></body></html>', { waitUntil: 'domcontentloaded' });
+    const extracted = await page.evaluate(extractMarketplaceItem, {
+      itemPath: MARKETPLACE_ITEM_PATH,
+      limits: { maxImages: 3, maxTextLength: 32, maxBodyTextLength: 40 }
+    });
+    expect(extracted.title).toHaveLength(32);
+    expect(extracted.bodyText.length).toBeLessThanOrEqual(40);
+    expect(extracted.imageUrls).toHaveLength(3);
   });
 
   it('blocks every request before network access, including fixture images', async () => {
