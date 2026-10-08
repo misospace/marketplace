@@ -5,6 +5,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { FixtureBackend, type ConversationBackend, type MarketplaceBackend } from './backend.js';
 import { FacebookMarketplaceBackend } from './facebook-marketplace-backend.js';
+import { FacebookMessengerBackend } from './facebook-messenger-backend.js';
 import type { FacebookMarket } from './facebook-marketplace-url.js';
 import { backendNameSchema, SERVICE_VERSION } from './domain.js';
 import { BrowserSessionManager } from './browser.js';
@@ -121,7 +122,6 @@ export function createMarketplaceService(options: ServiceOptions = {}): Marketpl
       ...(options.messengerBaseUrl !== undefined ? { baseUrl: options.messengerBaseUrl } : options.facebookBaseUrl !== undefined ? { baseUrl: options.facebookBaseUrl } : {}),
       logger
     }));
-  // TODO(#43 follow-up wave): wire the real Facebook Messenger conversation backend; Wave A stays fail-closed.
   // Read here rather than at module load, and only when the Facebook backend can actually use it:
   // a fixture service has no business touching the secret, and must not fail on a half-configured
   // pair. A half-configured pair still fails loudly once the Facebook backend is selected.
@@ -150,8 +150,6 @@ export function createMarketplaceService(options: ServiceOptions = {}): Marketpl
       waitMs: loginWaitMs,
       logger
     });
-  // Wave A creates the isolated credential-login instance, but no Messenger backend consumes it yet.
-  void messengerLogin;
   const backend = options.backend ?? (selectedBackendKind === 'facebook'
     ? new FacebookMarketplaceBackend({
       browser,
@@ -162,9 +160,16 @@ export function createMarketplaceService(options: ServiceOptions = {}): Marketpl
     })
     : new FixtureBackend());
   const backendName = backendNameSchema.parse(backend.name);
-  const conversations: ConversationBackend | undefined = options.backend === undefined && selectedBackendKind === 'facebook'
-    ? undefined
-    : isConversationBackend(backend) ? backend : undefined;
+  const conversations: ConversationBackend | undefined = messengerBrowser !== undefined && messengerProbe !== undefined
+    ? new FacebookMessengerBackend({
+      browser: messengerBrowser,
+      probe: messengerProbe,
+      ...(messengerLogin !== undefined ? { login: messengerLogin } : {}),
+      logger
+    })
+    : options.backend === undefined && selectedBackendKind === 'facebook'
+      ? undefined
+      : isConversationBackend(backend) ? backend : undefined;
   const adminPort = options.adminPort ?? REAUTH_ADMIN_PORT;
   const viewerPort = options.reauthViewerPort ?? REAUTH_VIEWER_PORT;
   const leaseMs = options.reauthLeaseMs ?? REAUTH_LEASE_MS;
@@ -310,6 +315,7 @@ export function createMarketplaceService(options: ServiceOptions = {}): Marketpl
     shutdownController.abort(new Error('Service shutting down'));
     closePromise = (async () => {
       if (backend instanceof FacebookMarketplaceBackend) await backend.close();
+      if (conversations instanceof FacebookMessengerBackend) await conversations.close();
       await stopReauthBounded(reauth, logger);
       await admin.close().catch((error: unknown) => {
         try {
