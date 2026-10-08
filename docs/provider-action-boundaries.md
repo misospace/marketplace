@@ -36,16 +36,16 @@ Every registered MCP tool declares exactly one risk class and the session scope 
 
 | Class | Meaning | Autonomy | Enforcement |
 |---|---|---|---|
-| `read` | No external side effect, no disclosure beyond the caller's own data | Autonomous | Valid session scope; no grant |
-| `prepare` | Builds a draft/artifact with no external effect (e.g. a message draft) | Autonomous, but its output is **not** authorization to send | Valid scope; no grant |
-| `send` | Delivers content to an external party (e.g. sends a seller message) | Never autonomous | Valid scope **and** a single-use approval grant bound to the exact payload, verified and consumed atomically before execution |
+| `read` | No external side effect, no disclosure beyond the caller's own data | Autonomous | Declared scope; no grant. Scope is enforced as declaration metadata; session validation remains the provider backend's responsibility (search/fetch already fail closed on `session_unknown`) until a second surface exists |
+| `prepare` | Builds a draft/artifact with no external effect (e.g. a message draft) | Autonomous, but its output is **not** authorization to send | Same as `read`; no grant |
+| `send` | Delivers content to an external party (e.g. sends a seller message) | Never autonomous | Valid scope **and** a single-use, issuance-authenticated approval grant bound to the exact payload, verified and consumed atomically before execution (no production send path exists today) |
 | `high_consequence` | Purchases, payments, sharing private data, hard commitments | Never | Refused unconditionally. No grant can enable it; enabling it later requires changing this gate explicitly, not presenting a better grant |
 
 Registered today: `marketplace_search`, `marketplace_fetch`, `marketplace_status` — all `read`. The registry is derived from the tool declarations themselves, so a tool cannot exist without a risk class.
 
 ## Approval grants
 
-When Miso decides an external message may be sent, OpenClaw presents Musebridge a grant. Musebridge verifies and consumes; it never issues, stores, extends, or retries grants.
+When Miso decides an external message may be sent, OpenClaw presents Musebridge a grant. Musebridge verifies and consumes; it never issues, stores, extends, or retries grants. **Issuance is not yet verifiable**: the shipped enforcement today is structural only — scope, payload digest, expiry, and single-use consumption. It protects against altered payloads and replay, but a fabricated grant with matching fields would pass, so no production send path exists until #43 ships a verifier that also authenticates issuance (a trusted host-only grant channel or an issuer signature). Until then, production authorization for `send` is deny-all: the service installs `DenyAllAuthorizer` and every send fails with `APPROVAL_REQUIRED`.
 
 Grant shape (zod-validated, `approvalGrantSchema` in `src/authorization.ts`):
 
@@ -54,7 +54,7 @@ Grant shape (zod-validated, `approvalGrantSchema` in `src/authorization.ts`):
 - `subject_digest` — lowercase SHA-256 hex (uppercase is rejected as malformed) of the canonical (key-sorted) JSON of the **validated** tool input: the form after Zod parsing, trimming, and defaults — the same form the backend executes. Hosts computing digests must use that form, not the raw request arguments. Inputs must stay JSON-representable (`undefined` fields canonicalize as `null`); any change to the payload invalidates the grant.
 - `expires_at` — ISO 8601 with offset. Expired at or before the verification instant.
 
-Enforcement rules (`authorizeAction` + `InMemoryActionAuthorizer`):
+Enforcement rules (`authorizeAction` + a provenance-verifying authorizer, once #43 provides one — production today is deny-all):
 
 1. Missing, malformed, or unparsable grant for a `send` action → `APPROVAL_REQUIRED`. The action never runs.
 2. Grant present but not valid for this request (scope mismatch, digest mismatch, expired, already consumed) → `ACTION_FORBIDDEN`.
@@ -63,7 +63,7 @@ Enforcement rules (`authorizeAction` + `InMemoryActionAuthorizer`):
 5. Registration-time check: registering a `send` or `high_consequence` tool without an authorizer configured fails at startup, not at first call. Without this PR's gate, a write tool would dispatch straight to the backend — that path no longer exists.
 6. If the host supplies no authorizer, a deny-all authorizer is installed; every `send` request fails closed with `APPROVAL_REQUIRED`.
 
-**Verifier scope and limits.** The in-memory verifier is per service instance: consumed grants do not survive a restart and are not shared across processes, so a multi-process deployment must not rely on it. A durable verifier with bounded storage is a prerequisite for shipping the first `send` tool (#43). The consumed set deliberately has no eviction cap — evicting a consumed grant would reopen replay — and grows only with approved sends, since a grant reaches it solely by passing full verification, not by attacker input.
+**Verifier scope and limits.** The only authorizer shipped for production is `DenyAllAuthorizer` — every `send` fails closed until a provenance-verifying implementation exists (#43). The verifying implementation used by the test suite (`UnverifiedGrantAuthorizer` under `tests/helpers/`) deliberately does **not** authenticate issuance and must never be wired into a production service. When the real verifier lands, consumed grants must be durable and bounded: per-instance in-memory consumption does not survive a restart or span processes, and an eviction cap would reopen replay — the set grows only with approved sends, since a grant reaches it solely by passing full verification, not by attacker input.
 
 **Timeout and resend semantics (binding for #43):** a `TIMEOUT` on a send means the outcome is unknown. It is never permission to resend. The send path must reconcile actual delivery state (read the thread, match by an idempotency token embedded in the draft) before any retry, and any retry is a new approval decision for Miso. Unconfirmed sends are reported as unknown, not as failure or success.
 

@@ -63,8 +63,8 @@ export interface MarketplaceToolOptions {
   backendTimeoutMs?: number;
   shutdownSignal?: AbortSignal;
   sessionAssessment?: () => ProviderSessionAssessment;
-  /** Per-call host seam for approval grants; this service does not issue grants. */
-  approvalGrant?: (toolName: string) => unknown;
+  /** Per-call host seam for approval grants; receives the validated action request (including the payload digest) so a host can correlate it with its own approval records. Grants must come from the host, never from tool arguments. This service does not issue grants. */
+  approvalGrant?: (request: ActionRequest) => unknown;
   authorizer?: ActionAuthorizer;
 }
 
@@ -115,20 +115,20 @@ export function registerMarketplaceTools(
     if (!parsed.success) throw new McpError(ErrorCode.InvalidParams, formatValidationError(parsed.error));
 
     const definition = TOOL_DEFINITIONS[name];
-    let grant: unknown;
-    if (definition.riskClass === 'send') {
-      try {
-        grant = options.approvalGrant?.(name);
-      } catch {
-        // A host that cannot produce a grant must never authorize a send; fail closed below.
-        grant = undefined;
-      }
-    }
     const actionRequest: ActionRequest = {
       ...definition.scope,
       action: name,
       subjectDigest: subjectDigest(parsed.data)
     };
+    let grant: unknown;
+    if (definition.riskClass === 'send') {
+      try {
+        grant = options.approvalGrant?.(actionRequest);
+      } catch {
+        // A host that cannot produce a grant must never authorize a send; fail closed below.
+        grant = undefined;
+      }
+    }
     const decision = authorizeAction(definition, actionRequest, authorizer, grant);
 
     const outputSchema = name === 'marketplace_search'

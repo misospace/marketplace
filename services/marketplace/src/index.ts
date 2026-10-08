@@ -85,7 +85,6 @@ export {
   subjectDigest,
   authorizeAction,
   DenyAllAuthorizer,
-  InMemoryActionAuthorizer,
   type ActionRiskClass,
   type ActionScope,
   type ActionDefinition,

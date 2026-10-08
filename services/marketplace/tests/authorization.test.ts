@@ -8,9 +8,9 @@ import {
   authorizeAction,
   canonicalActionInput,
   DenyAllAuthorizer,
-  InMemoryActionAuthorizer,
   subjectDigest
 } from '../src/authorization.js';
+import { UnverifiedGrantAuthorizer } from './helpers/unverified-grant-authorizer.js';
 import { FixtureBackend } from '../src/backend.js';
 import { registerMarketplaceTools, assertWritableToolsHaveAuthorizer, TOOL_DEFINITIONS } from '../src/tools.js';
 
@@ -76,12 +76,12 @@ describe('action authorization gate', () => {
   });
 
   it('accepts a valid send grant through the in-memory authorizer', () => {
-    const authorizer = new InMemoryActionAuthorizer({ now: () => fixedNow });
+    const authorizer = new UnverifiedGrantAuthorizer({ now: () => fixedNow });
     expect(authorizeAction(sendDefinition, request, authorizer, grant())).toEqual({ ok: true });
   });
 
   it('refuses high-consequence actions even with a valid grant and authorizer', () => {
-    const authorizer = new InMemoryActionAuthorizer({ now: () => fixedNow });
+    const authorizer = new UnverifiedGrantAuthorizer({ now: () => fixedNow });
     const definition: ActionDefinition = { riskClass: 'high_consequence', scope: sendDefinition.scope };
 
     expect(authorizeAction(definition, request, authorizer, grant())).toEqual({
@@ -95,12 +95,12 @@ describe('action authorization gate', () => {
 
 describe('in-memory approval grants', () => {
   it('accepts one correctly scoped, unexpired grant', () => {
-    const authorizer = new InMemoryActionAuthorizer({ now: () => fixedNow });
+    const authorizer = new UnverifiedGrantAuthorizer({ now: () => fixedNow });
     expect(authorizer.authorize(request, grant())).toEqual({ ok: true });
   });
 
   it('requires a schema-valid grant', () => {
-    const authorizer = new InMemoryActionAuthorizer({ now: () => fixedNow });
+    const authorizer = new UnverifiedGrantAuthorizer({ now: () => fixedNow });
     expect(authorizer.authorize(request, {})).toEqual({
       ok: false,
       code: 'APPROVAL_REQUIRED',
@@ -115,24 +115,24 @@ describe('in-memory approval grants', () => {
     ['action', { action: 'other-action' }],
     ['subject_digest', { subject_digest: '0'.repeat(64) }]
   ] as const)('rejects a grant with a mismatched %s', (_field, mismatch) => {
-    const authorizer = new InMemoryActionAuthorizer({ now: () => fixedNow });
+    const authorizer = new UnverifiedGrantAuthorizer({ now: () => fixedNow });
     expect(authorizer.authorize(request, grant(mismatch))).toMatchObject({ ok: false, code: 'ACTION_FORBIDDEN' });
   });
 
   it('treats expiry equal to now as expired and accepts a grant one millisecond in the future', () => {
-    const expiredAuthorizer = new InMemoryActionAuthorizer({ now: () => fixedNow });
+    const expiredAuthorizer = new UnverifiedGrantAuthorizer({ now: () => fixedNow });
     expect(expiredAuthorizer.authorize(request, grant({ expires_at: fixedNow.toISOString() }))).toEqual({
       ok: false,
       code: 'ACTION_FORBIDDEN',
       message: 'The approval grant has expired.'
     });
 
-    const futureAuthorizer = new InMemoryActionAuthorizer({ now: () => fixedNow });
+    const futureAuthorizer = new UnverifiedGrantAuthorizer({ now: () => fixedNow });
     expect(futureAuthorizer.authorize(request, grant({ expires_at: new Date(fixedNow.getTime() + 1).toISOString() }))).toEqual({ ok: true });
   });
 
   it('rejects replay after consuming a grant', () => {
-    const authorizer = new InMemoryActionAuthorizer({ now: () => fixedNow });
+    const authorizer = new UnverifiedGrantAuthorizer({ now: () => fixedNow });
     const approval = grant();
 
     expect(authorizer.authorize(request, approval)).toEqual({ ok: true });
@@ -144,7 +144,7 @@ describe('in-memory approval grants', () => {
   });
 
   it('consumes exactly one grant across repeated attempts (synchronous verify-then-consume)', () => {
-    const authorizer = new InMemoryActionAuthorizer({ now: () => fixedNow });
+    const authorizer = new UnverifiedGrantAuthorizer({ now: () => fixedNow });
     const approval = grant();
     const decisions = [authorizer.authorize(request, approval), authorizer.authorize(request, approval)];
 
