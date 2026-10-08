@@ -3,15 +3,17 @@ WORKDIR /app
 
 FROM base AS dependencies
 COPY package.json package-lock.json ./
+COPY services/marketplace/package.json ./services/marketplace/package.json
 RUN npm ci --ignore-scripts
 
 FROM dependencies AS build
-COPY tsconfig.json ./
-COPY src ./src
+COPY services/marketplace/tsconfig.json ./services/marketplace/tsconfig.json
+COPY services/marketplace/src ./services/marketplace/src
 RUN npm run build
 
 FROM base AS production-dependencies
 COPY package.json package-lock.json ./
+COPY services/marketplace/package.json ./services/marketplace/package.json
 RUN npm ci --omit=dev --ignore-scripts
 
 FROM base AS runtime
@@ -21,15 +23,17 @@ ENV NODE_ENV=production \
     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
     BROWSER_PROFILE_DIR=/home/node/.marketplace/browser-profile
 COPY --from=production-dependencies --chown=node:node /app/node_modules ./node_modules
+RUN rm -f node_modules/marketplace-mcp
 # These packages support the temporary interactive re-auth console.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends xvfb x11vnc novnc websockify \
     && rm -rf /var/lib/apt/lists/*
-# Follow Playwright's documented "build your own image" approach; match the browser to the pinned npm package.
+# Follow Playwright's documented build-your-own-image approach; match the browser to the pinned npm package.
 RUN ./node_modules/.bin/playwright install --with-deps chromium \
     && chown -R node:node /ms-playwright \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=build --chown=node:node /app/dist ./dist
+COPY --from=build --chown=node:node /app/services/marketplace/dist ./dist
+COPY --chown=node:node services/marketplace/package.json ./package.json
 USER node
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \

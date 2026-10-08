@@ -1,29 +1,18 @@
 {
-  "name": "marketplace-mcp-fixture",
-  "version": "0.1.0",
+  "name": "musebridge",
   "private": true,
   "type": "module",
-  "description": "Fixture-only Marketplace MCP service",
   "engines": {
     "node": ">=24 <25"
   },
-  "main": "./dist/index.js",
-  "exports": "./dist/index.js",
+  "workspaces": [
+    "services/*"
+  ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.test.json",
-    "test": "vitest run",
-    "lint": "npm run typecheck",
-    "start": "node dist/index.js"
-  },
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "1.32.1",
-    "playwright": "1.64.0",
-    "zod": "4.6.5"
-  },
-  "devDependencies": {
-    "@types/node": "24.19.1",
-    "typescript": "7.0.2",
-    "vitest": "5.0.3"
+    "build": "npm run build --workspace=services/marketplace",
+    "typecheck": "npm run typecheck --workspace=services/marketplace",
+    "test": "npm run test --workspace=services/marketplace --",
+    "lint": "npm run lint --workspace=services/marketplace",
+    "start": "npm run start --workspace=services/marketplace"
   }
 }

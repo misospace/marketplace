@@ -1,6 +1,11 @@
 **
 !Dockerfile
-!package*.json
-!tsconfig.json
-!src/
-!src/**
+!services/
+!services/marketplace/
+!services/marketplace/Dockerfile
+!services/marketplace/package.json
+!services/marketplace/tsconfig.json
+!services/marketplace/src/
+!services/marketplace/src/**/*.ts
+!package.json
+!package-lock.json
