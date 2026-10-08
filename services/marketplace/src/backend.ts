@@ -3,6 +3,8 @@ import {
   fetchInputSchema,
   threadsListInputSchema,
   threadReadInputSchema,
+  shoppingFetchInputSchema,
+  shoppingSearchInputSchema,
   providerErrorMetadataSchema,
   providerErrorSchema,
   searchInputSchema,
@@ -10,6 +12,7 @@ import {
   type ConversationMessage,
   type ConversationThread,
   type ConversationThreadMessages,
+  type ProductOffer,
   type ProviderErrorCode,
   type ProviderErrorMetadata
 } from './domain.js';
@@ -25,6 +28,14 @@ export interface ConversationBackend {
   readonly name: string;
   listThreads(input: ReturnType<typeof threadsListInputSchema.parse>, signal: AbortSignal): Promise<ConversationThread[]> | ConversationThread[];
   readThread(input: ReturnType<typeof threadReadInputSchema.parse>, signal: AbortSignal): Promise<ConversationThreadMessages | null> | ConversationThreadMessages | null;
+}
+
+// Cross-site shopping surface (#48). HTTP-API-backed, no browser session; `name` is the
+// configured backend kind ('ebay'), while each offer carries its own `provider` value.
+export interface ShoppingBackend {
+  readonly name: string;
+  search(input: ReturnType<typeof shoppingSearchInputSchema.parse>, signal: AbortSignal): Promise<ProductOffer[]> | ProductOffer[];
+  fetch(input: ReturnType<typeof shoppingFetchInputSchema.parse>, signal: AbortSignal): Promise<ProductOffer | null> | ProductOffer | null;
 }
 
 export class ProviderError extends Error {
