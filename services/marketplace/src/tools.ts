@@ -1,7 +1,7 @@
 import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { CallToolRequestSchema, ErrorCode, ListToolsRequestSchema, McpError } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
-import { ProviderError, type ConversationBackend, type MarketplaceBackend } from './backend.js';
+import { ProviderError, type ConversationBackend, type MarketplaceBackend, type ShoppingBackend } from './backend.js';
 import type { ProviderSessionAssessment } from './browser.js';
 import {
   authorizeAction,
@@ -26,11 +26,16 @@ import {
   statusOutputSchema,
   providerErrorSchema,
   runtimeFailureSchema,
-  type RuntimeFailure
+  type RuntimeFailure,
+  shoppingSearchInputSchema,
+  shoppingFetchInputSchema,
+  shoppingSearchOutputSchema,
+  shoppingFetchOutputSchema
 } from './domain.js';
 
 const marketplaceScope = { provider: 'facebook', account: 'default', surface: 'marketplace' } as const;
 const messengerScope = { provider: 'facebook', account: 'default', surface: 'messenger' } as const;
+const shoppingScope = { provider: 'ebay', account: 'default', surface: 'shopping' } as const;
 
 const TOOLS = [
   {
@@ -53,6 +58,20 @@ const TOOLS = [
     inputSchema: statusInputSchema,
     outputSchema: statusOutputSchema,
     definition: { riskClass: 'read', scope: marketplaceScope }
+  },
+  {
+    name: 'shopping_search',
+    description: 'Search one configured shopping source for products with prices, availability, and provenance. Read-only.',
+    inputSchema: shoppingSearchInputSchema,
+    outputSchema: shoppingSearchOutputSchema,
+    definition: { riskClass: 'read', scope: shoppingScope }
+  },
+  {
+    name: 'shopping_fetch',
+    description: 'Fetch one product offer by canonical ID or URL from the configured shopping source. Read-only.',
+    inputSchema: shoppingFetchInputSchema,
+    outputSchema: shoppingFetchOutputSchema,
+    definition: { riskClass: 'read', scope: shoppingScope }
   },
   {
     name: 'messenger_threads_list',
@@ -86,6 +105,7 @@ export interface MarketplaceToolOptions {
   approvalGrant?: (request: ActionRequest) => unknown;
   authorizer?: ActionAuthorizer;
   conversations?: ConversationBackend;
+  shopping?: ShoppingBackend;
 }
 
 export function assertWritableToolsHaveAuthorizer(
@@ -159,8 +179,12 @@ export function registerMarketplaceTools(
           ? threadsListOutputSchema
           : name === 'messenger_thread_read'
             ? threadReadOutputSchema
-            : statusOutputSchema;
-    let validatedOutput: z.infer<typeof searchOutputSchema | typeof fetchOutputSchema | typeof statusOutputSchema | typeof threadsListOutputSchema | typeof threadReadOutputSchema>;
+            : name === 'shopping_search'
+              ? shoppingSearchOutputSchema
+              : name === 'shopping_fetch'
+                ? shoppingFetchOutputSchema
+                : statusOutputSchema;
+    let validatedOutput: z.infer<typeof searchOutputSchema | typeof fetchOutputSchema | typeof statusOutputSchema | typeof threadsListOutputSchema | typeof threadReadOutputSchema | typeof shoppingSearchOutputSchema | typeof shoppingFetchOutputSchema>;
     if (!decision.ok) {
       // Refusals parse against the shared runtime failure schema so the uniform refusal shape
       // does not depend on each tool's success-oriented output schema.
@@ -208,6 +232,28 @@ export function registerMarketplaceTools(
           output = thread === null
             ? runtimeFailure('NOT_FOUND', 'No conversation thread matched the supplied identifier.')
             : { ok: true, backend: backendName, thread_id: thread.thread_id, messages: thread.messages };
+        } else if (name === 'shopping_search') {
+          const shopping = options.shopping;
+          if (!shopping) throw new ProviderError('UPSTREAM_ERROR', 'The shopping surface is not configured on this deployment.');
+          const offers = await runBackendOperation(
+            (signal) => shopping.search(parsed.data as z.infer<typeof shoppingSearchInputSchema>, signal),
+            backendTimeoutMs,
+            extra.signal,
+            shutdownSignal
+          );
+          output = { ok: true, backend: shopping.name, offers };
+        } else if (name === 'shopping_fetch') {
+          const shopping = options.shopping;
+          if (!shopping) throw new ProviderError('UPSTREAM_ERROR', 'The shopping surface is not configured on this deployment.');
+          const offer = await runBackendOperation(
+            (signal) => shopping.fetch(parsed.data as z.infer<typeof shoppingFetchInputSchema>, signal),
+            backendTimeoutMs,
+            extra.signal,
+            shutdownSignal
+          );
+          output = offer === null
+            ? runtimeFailure('NOT_FOUND', 'No product offer matched the supplied identifier.')
+            : { ok: true, backend: shopping.name, offer };
         } else {
           const sessionAssessment = options.sessionAssessment;
           output = {
@@ -215,6 +261,7 @@ export function registerMarketplaceTools(
             service_version: SERVICE_VERSION,
             schema_version: SCHEMA_VERSION,
             backend: backendName,
+            shopping_backend: options.shopping?.name,
             ...(sessionAssessment ? { facebook_session: { status: sessionAssessment() } } : {})
           };
         }

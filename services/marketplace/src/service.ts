@@ -3,7 +3,10 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { FixtureBackend, type ConversationBackend, type MarketplaceBackend } from './backend.js';
+import { FixtureBackend, type ConversationBackend, type MarketplaceBackend, type ShoppingBackend } from './backend.js';
+import { FixtureShoppingBackend } from './fixtures.js';
+import { EbayClient } from './ebay.js';
+import { EbayShoppingBackend } from './ebay-backend.js';
 import { FacebookMarketplaceBackend } from './facebook-marketplace-backend.js';
 import { FacebookMessengerBackend } from './facebook-messenger-backend.js';
 import type { FacebookMarket } from './facebook-marketplace-url.js';
@@ -33,6 +36,9 @@ const REAUTH_LEASE_MS = parseReauthLease(process.env.REAUTH_LEASE_MS);
 export interface ServiceOptions {
   backend?: MarketplaceBackend;
   backendKind?: 'fixture' | 'facebook';
+  shoppingBackendKind?: 'fixture' | 'ebay';
+  shopping?: ShoppingBackend;
+  ebayBaseUrl?: string;
   facebookMarkets?: readonly FacebookMarket[];
   host?: string;
   port?: number;
@@ -70,6 +76,7 @@ export interface MarketplaceService {
   readonly admin: ReauthAdminServer;
   readonly messengerBrowser?: BrowserSessionManager;
   readonly messengerProbe?: FacebookSessionProbe;
+  readonly shopping: ShoppingBackend;
   close(): Promise<void>;
   address(): ReturnType<HttpServer['address']>;
 }
@@ -83,6 +90,18 @@ export function createMarketplaceService(options: ServiceOptions = {}): Marketpl
     throw new TypeError('FACEBOOK_USERNAME and FACEBOOK_PASSWORD must be set together');
   }
   const selectedBackendKind = options.backendKind ?? parseBackendKind(process.env.MARKETPLACE_BACKEND);
+  const shoppingBackendKind = options.shoppingBackendKind ?? parseShoppingBackendKind(process.env.SHOPPING_BACKEND);
+  if (options.shopping !== undefined && options.shoppingBackendKind !== undefined) {
+    throw new TypeError('shopping and shoppingBackendKind cannot both select a backend');
+  }
+  const ebayBaseUrl = options.ebayBaseUrl ?? process.env.EBAY_BASE_URL;
+  const shopping = options.shopping ?? (shoppingBackendKind === 'ebay'
+    ? new EbayShoppingBackend(new EbayClient({
+      clientId: requiredEnv('EBAY_CLIENT_ID'),
+      clientSecret: requiredEnv('EBAY_CLIENT_SECRET'),
+      ...(ebayBaseUrl !== undefined ? { baseUrl: ebayBaseUrl } : {})
+    }))
+    : new FixtureShoppingBackend());
   const loginWaitMs = options.facebookLoginWaitMs ?? parseLoginWaitMs(process.env.FACEBOOK_LOGIN_WAIT_SECONDS);
   if (!Number.isSafeInteger(loginWaitMs) || loginWaitMs <= 0) {
     throw new RangeError('facebookLoginWaitMs must be a positive safe integer');
@@ -301,7 +320,8 @@ export function createMarketplaceService(options: ServiceOptions = {}): Marketpl
         backendTimeoutMs,
         shutdownSignal: shutdownController.signal,
         sessionAssessment: () => toProviderSessionAssessment(browser.getInfo()),
-        conversations
+        conversations,
+        shopping
       });
       await mcp.connect(transport);
       await transport.handleRequest(request, response, body);
@@ -359,6 +379,7 @@ export function createMarketplaceService(options: ServiceOptions = {}): Marketpl
     admin,
     ...(messengerBrowser !== undefined ? { messengerBrowser } : {}),
     ...(messengerProbe !== undefined ? { messengerProbe } : {}),
+    shopping,
     address: () => httpServer.address(),
     close
   };
@@ -379,6 +400,18 @@ function parseHost(value: string | undefined): string {
 
 export function parseMessengerEnabled(value: string | undefined): boolean {
   return value === '1';
+}
+
+export function parseShoppingBackendKind(value: string | undefined): 'fixture' | 'ebay' {
+  if (value === undefined || value === 'fixture') return 'fixture';
+  if (value === 'ebay') return 'ebay';
+  throw new RangeError('SHOPPING_BACKEND must be either "fixture" or "ebay"');
+}
+
+function requiredEnv(name: 'EBAY_CLIENT_ID' | 'EBAY_CLIENT_SECRET'): string {
+  const value = process.env[name];
+  if (!value) throw new RangeError(`${name} is required when SHOPPING_BACKEND=ebay`);
+  return value;
 }
 
 export function parseBackendKind(value: string | undefined): 'fixture' | 'facebook' {
