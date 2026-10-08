@@ -192,16 +192,20 @@ describe.skipIf(!browserAvailable)('Facebook credential login', () => {
   itWithTimeout('keeps the credential login alive after the search deadline expires', async () => {
     // Timings are test-scaled but keep the invariant relationships: the approval (2.5s after
     // submit) lands after the search deadline (1.5s), and the post-timeout sleep lands after the
-    // approval yet inside the login's 4s wait window, so the login is still the same in-flight
+    // approval yet inside the login's 5s wait window, so the login is still the same in-flight
     // attempt when the approval arrives.
     const { manager, login, server } = await harness('deadline-then-approve', undefined, {
       username: 'u',
       password: 'p',
-      waitMs: 4_000
+      waitMs: 5_000
     });
     server.setApprovalDelay(2_500);
     server.setApprovalPage('/');
     const probe = new FacebookSessionProbe({ browser: manager, baseUrl: server.origin, navigationTimeoutMs: 2_000, settleTimeoutMs: 150 });
+    // Warm the browser before the deadline starts. The invariant under test is the deadline vs
+    // approval relationship, not launch latency, and a cold Chromium launch is not abortable by
+    // the search signal -- on the warmed browser the form submits within milliseconds.
+    await probe.probeSession(new AbortController().signal);
     const backend = new FacebookMarketplaceBackend({ browser: manager, probe, login, logger: { error: () => undefined } });
     const operation = runBackendOperation(
       (signal) => backend.search({ query: 'bike', location: 'NYC', limit: 5 }, signal),
@@ -214,7 +218,7 @@ describe.skipIf(!browserAvailable)('Facebook credential login', () => {
     await expect(operation).rejects.toMatchObject({ code: 'TIMEOUT' });
     expect(server.submissions).toHaveLength(1);
     expect(manager.getInfo().status).not.toBe('session_usable');
-    await new Promise((resolve) => setTimeout(resolve, 2_000));
+    await new Promise((resolve) => setTimeout(resolve, 2_500));
     await expect(probe.probeSession(new AbortController().signal)).resolves.toMatchObject({ status: 'session_usable' });
     expect(server.submissions).toHaveLength(1);
     await backend.close();
