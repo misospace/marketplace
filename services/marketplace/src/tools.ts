@@ -129,7 +129,7 @@ export function registerMarketplaceTools(
     // Validate here instead of returning an MCP tool-error result for malformed arguments.
     const args = request.params.arguments ?? {};
     const parsed = schema.safeParse(args);
-    if (parsed.success && (name === 'marketplace_search' || name === 'marketplace_fetch' || name === 'messenger_thread_read') && request.params.arguments === undefined) {
+    if (parsed.success && (name === 'marketplace_search' || name === 'marketplace_fetch') && request.params.arguments === undefined) {
       throw new McpError(ErrorCode.InvalidParams, 'Tool arguments are required');
     }
     if (!parsed.success) throw new McpError(ErrorCode.InvalidParams, formatValidationError(parsed.error));

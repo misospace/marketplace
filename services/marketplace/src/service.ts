@@ -147,6 +147,7 @@ export function createMarketplaceService(options: ServiceOptions = {}): Marketpl
       ...(options.messengerBaseUrl !== undefined
         ? { baseUrl: options.messengerBaseUrl }
         : options.facebookBaseUrl !== undefined ? { baseUrl: options.facebookBaseUrl } : {}),
+      surface: 'messenger',
       waitMs: loginWaitMs,
       logger
     });

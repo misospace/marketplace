@@ -3,6 +3,7 @@ import { BrowserSessionManager, sleepUntilAbort } from './browser.js';
 import { ProviderError } from './backend.js';
 import {
   FACEBOOK_ORIGIN,
+  FACEBOOK_MESSENGER_PATH,
   FACEBOOK_MARKETPLACE_PATH,
   classifyFacebookSession,
   normalizeFacebookBaseUrl,
@@ -51,6 +52,12 @@ export interface FacebookCredentialLoginOptions {
   password: string;
   baseUrl?: string;
   loginPath?: string;
+  /**
+   * Which surface's authenticated state the login verifies before reporting success. The default
+   * `marketplace` preserves the deployed behavior exactly; the messenger scope's login instance
+   * passes `messenger` so its post-approval verification navigates and classifies `/messages/`.
+   */
+  surface?: 'marketplace' | 'messenger';
   waitMs?: number;
   pollIntervalMs?: number;
   navigationTimeoutMs?: number;
@@ -105,6 +112,8 @@ export class FacebookCredentialLogin {
   readonly baseUrl: string;
   readonly loginUrl: string;
   private readonly browser: BrowserSessionManager;
+  private readonly surface: 'marketplace' | 'messenger';
+  private readonly verifyUrl: string;
   private readonly waitMs: number;
   private readonly pollIntervalMs: number;
   private readonly navigationTimeoutMs: number;
@@ -137,6 +146,13 @@ export class FacebookCredentialLogin {
       throw new TypeError('loginPath must resolve to the same origin as baseUrl');
     }
     this.loginUrl = loginUrl.href;
+    this.surface = options.surface ?? 'marketplace';
+    if (this.surface !== 'marketplace' && this.surface !== 'messenger') {
+      throw new TypeError('surface must be marketplace or messenger');
+    }
+    // The login verifies success on its own surface's entry point: the messenger scope's login
+    // must not depend on Marketplace being reachable to confirm an approval that already landed.
+    this.verifyUrl = new URL(this.surface === 'messenger' ? FACEBOOK_MESSENGER_PATH : FACEBOOK_MARKETPLACE_PATH, this.baseUrl).href;
     // Held off-instance so serializing the login object cannot expose the credentials.
     credentialStore.set(this, { username: options.username, password: options.password });
     this.waitMs = options.waitMs ?? FACEBOOK_LOGIN_WAIT_DEFAULT_MS;
@@ -217,15 +233,15 @@ export class FacebookCredentialLogin {
 
       try {
         const snapshot = await readFacebookPage(page);
-        last = classifyFacebookSession(snapshot, this.baseUrl);
+        last = classifyFacebookSession(snapshot, this.baseUrl, this.surface);
         if (last.status === 'session_usable') return { outcome: 'authenticated' };
-        if (last.status === 'session_unknown' && isAuthenticatedNonMarketplacePage(snapshot, this.baseUrl)) {
-          await page.goto(new URL(FACEBOOK_MARKETPLACE_PATH, this.baseUrl).href, {
+        if (last.status === 'session_unknown' && isAuthenticatedNonVerificationPage(snapshot, this.baseUrl, this.verifyUrl)) {
+          await page.goto(this.verifyUrl, {
             waitUntil: 'domcontentloaded',
             timeout: this.navigationTimeoutMs,
             signal
           });
-          last = classifyFacebookSession(await readFacebookPage(page), this.baseUrl);
+          last = classifyFacebookSession(await readFacebookPage(page), this.baseUrl, this.surface);
           if (last.status === 'session_usable') return { outcome: 'authenticated' };
         }
       } catch (error) {
@@ -249,15 +265,15 @@ export class FacebookCredentialLogin {
       return { outcome: 'challenge', code: 'SESSION_INVALID' };
     }
 
-    // Match the reference flow's final Marketplace navigation, even when approval landed elsewhere.
+    // Match the reference flow's final verification navigation, even when approval landed elsewhere.
     if (signal.aborted) throw signal.reason ?? new Error('Browser operation aborted');
     try {
-      await page.goto(new URL(FACEBOOK_MARKETPLACE_PATH, this.baseUrl).href, {
+      await page.goto(this.verifyUrl, {
         waitUntil: 'domcontentloaded',
         timeout: this.navigationTimeoutMs,
         signal
       });
-      last = classifyFacebookSession(await readFacebookPage(page), this.baseUrl);
+      last = classifyFacebookSession(await readFacebookPage(page), this.baseUrl, this.surface);
       if (last.status === 'session_usable') return { outcome: 'authenticated' };
     } catch (error) {
       if (signal.aborted) throw signal.reason ?? error;
@@ -310,14 +326,19 @@ function readOpaqueCredential(value: string | undefined): string | undefined {
   return typeof value === 'string' && value.trim() ? value : undefined;
 }
 
-function isAuthenticatedNonMarketplacePage(
+function isAuthenticatedNonVerificationPage(
   snapshot: FacebookPageSnapshot,
-  baseUrl: string
+  baseUrl: string,
+  verifyUrl: string
 ): boolean {
   try {
     const url = new URL(snapshot.url);
+    const verifyPath = new URL(verifyUrl).pathname;
+    // The verification path itself must classify through classifyFacebookSession; this check only
+    // decides whether an authenticated-looking page elsewhere justifies navigating there.
+    const prefix = verifyPath.endsWith('/') ? verifyPath.slice(0, -1) : verifyPath;
     return url.origin === new URL(baseUrl).origin &&
-      (url.pathname !== '/marketplace' && !url.pathname.startsWith('/marketplace/')) &&
+      url.pathname !== prefix && !url.pathname.startsWith(`${prefix}/`) &&
       snapshot.hasAuthenticatedMarker && !snapshot.hasPasswordInput && !snapshot.hasLoginForm;
   } catch {
     return false;

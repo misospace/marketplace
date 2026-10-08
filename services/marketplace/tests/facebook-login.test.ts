@@ -279,6 +279,35 @@ describe.skipIf(!browserAvailable)('Facebook credential login', () => {
     expect(manager.getInfo().status).toBe('session_unknown');
   });
 
+  itWithTimeout('verifies the messenger surface without depending on Marketplace', async () => {
+    const server = await startLoginServer();
+    servers.push(server);
+    server.setMode('approve-home-after-submit');
+    const manager = createManager();
+    const login = new FacebookCredentialLogin({
+      browser: manager,
+      username: USERNAME_SENTINEL,
+      password: PASSWORD_SENTINEL,
+      baseUrl: server.origin,
+      surface: 'messenger',
+      waitMs: 3_000,
+      pollIntervalMs: 100,
+      navigationTimeoutMs: 2_000,
+      typingDelayMs: 1,
+      consentTimeoutMs: 50,
+      consentSettleMs: 50,
+      logger: { error: () => undefined }
+    });
+
+    await expect(login.attempt(new AbortController().signal)).resolves.toEqual({ outcome: 'authenticated' });
+    // The approval lands on the authenticated home page; verification must navigate /messages/ and
+    // must not lean on Marketplace being reachable.
+    expect(server.requests).toContain('/');
+    expect(server.requests).toContain('/messages/');
+    expect(server.requests).not.toContain('/marketplace/');
+    expect(manager.getInfo().status).toBe('session_unknown');
+  });
+
   itWithTimeout('preserves whitespace in the submitted password exactly', async () => {
     const server = await startLoginServer();
     servers.push(server);
