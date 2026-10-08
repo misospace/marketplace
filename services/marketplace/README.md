@@ -23,7 +23,7 @@ docker build -f services/marketplace/Dockerfile -t marketplace-mcp .
 docker run --rm -p 8080:8080 marketplace-mcp
 ```
 
-GHCR publishes `ghcr.io/misospace/marketplace` for pushes to `main` and semantic version tags matching `v*.*.*`, after the Node 24 typecheck, lint, test, and build checks pass. The existing version-tag release scheme is retained; image tags (`main`, SHA, and semantic version) remain unchanged. Future image, profile, or tag changes must be coordinated with the service owner. Renovate uses the shared org preset; automatic dependency merges remain disabled for manual review during the fixture milestone.
+GHCR publishes `ghcr.io/misospace/marketplace-mcp` for pushes to `main` and semantic version tags matching `v*.*.*`, after the Node 24 typecheck, lint, test, and build checks pass. The existing version-tag release scheme is retained; image tags (`main`, SHA, and semantic version) remain unchanged. Future image, profile, or tag changes must be coordinated with the service owner. Renovate uses the shared org preset; automatic dependency merges remain disabled for manual review during the fixture milestone.
 
 The service has no built-in authentication. Run it only on a trusted private network and provide network-level access controls before exposing it to other networks. ToolHive can use the service's Streamable HTTP transport at port `8080` and path `/mcp`, but it is not registered with ToolHive yet.
 
@@ -108,6 +108,6 @@ npm test
 npm run lint
 ```
 
-The source package, tests, scripts, and TypeScript configs now live under `services/marketplace`. Hosts that mounted the old source, `tests`, or `dist` paths must update those paths to `services/marketplace/src`, `services/marketplace/tests`, and `services/marketplace/dist`. Root-level `npm start` remains supported; hosts that launched the file directly must change `node dist/index.js` to `node services/marketplace/dist/index.js`. The container entry remains `/app/dist/index.js`. The image remains `ghcr.io/misospace/marketplace`; image tags (`main`, SHA, and semantic version) remain unchanged, with Git release tags matching `v*.*.*`. Coordinate any future image, profile, or tag changes with the service owner.
+The source package, tests, scripts, and TypeScript configs now live under `services/marketplace`. Hosts that mounted the old source, `tests`, or `dist` paths must update those paths to `services/marketplace/src`, `services/marketplace/tests`, and `services/marketplace/dist`. Root-level `npm start` remains supported; hosts that launched the file directly must change `node dist/index.js` to `node services/marketplace/dist/index.js`. The container entry remains `/app/dist/index.js`. The image is now `ghcr.io/misospace/marketplace-mcp`; the legacy `ghcr.io/misospace/marketplace` image is no longer published and there is no alias, so hosts must update their image references. Image tags (`main`, SHA, and semantic version) remain unchanged, with Git release tags matching `v*.*.*`. Coordinate any future image, profile, or tag changes with the service owner.
 
 The stale release PR #21 must be regenerated after this monorepo change merges; it must not be auto-merged.
