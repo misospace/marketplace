@@ -17,3 +17,5 @@ npm start
 ```
 
 The service package retains its own `dist/index.js` runtime entry. See the [Marketplace service README](services/marketplace/README.md) for tools, configuration, safety constraints, and container instructions.
+
+Before write-capable provider tools, actions are governed by the [provider action boundary contract](docs/provider-action-boundaries.md): session scopes per provider/account/surface, action risk classes, and single-use approval grants enforced by the service.

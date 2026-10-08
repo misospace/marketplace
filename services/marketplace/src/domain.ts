@@ -78,7 +78,9 @@ export const statusInputSchema = z.object({}).strict();
 export const runtimeErrorCodeSchema = z.enum([
   ...PROVIDER_ERROR_CODES,
   'NOT_FOUND',
-  'INTERNAL_ERROR'
+  'INTERNAL_ERROR',
+  'APPROVAL_REQUIRED',
+  'ACTION_FORBIDDEN'
 ]);
 
 export const providerErrorMetadataSchema = z.object({
