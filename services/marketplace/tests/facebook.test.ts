@@ -65,6 +65,22 @@ const baseSnapshot = (overrides: Partial<FacebookPageSnapshot> = {}): FacebookPa
 });
 
 describe('Facebook session classification', () => {
+  it('uses the Messenger decisive condition only for the Messenger surface', () => {
+    const messengerSnapshot = baseSnapshot({
+      url: 'http://127.0.0.1:3210/messages/t/thread-1',
+      hasMarketplaceLink: false
+    });
+
+    expect(classifyFacebookSession(messengerSnapshot, 'http://127.0.0.1:3210', 'messenger'))
+      .toEqual({ status: 'session_usable', outcome: 'messages_authenticated' });
+    expect(classifyFacebookSession(messengerSnapshot, 'http://127.0.0.1:3210'))
+      .toEqual({ status: 'session_unknown', outcome: 'ambiguous' });
+    expect(classifyFacebookSession({ ...messengerSnapshot, hasLoginPrompt: true }, 'http://127.0.0.1:3210', 'messenger'))
+      .toEqual({ status: 'session_needs_reauth', outcome: 'login_required', code: 'LOGIN_REQUIRED' });
+    expect(classifyFacebookSession({ ...messengerSnapshot, url: 'https://elsewhere.example/messages/' }, 'http://127.0.0.1:3210', 'messenger'))
+      .toEqual({ status: 'session_unknown', outcome: 'ambiguous' });
+  });
+
   it.each([
     ['authenticated Marketplace page', baseSnapshot(), 'session_usable', 'marketplace_authenticated', undefined],
     ['Marketplace chrome without authentication marker', baseSnapshot({ hasAuthenticatedMarker: false }), 'session_unknown', 'ambiguous', undefined],
@@ -102,6 +118,9 @@ describe('Facebook session probe construction', () => {
 
     expect(FACEBOOK_ORIGIN).toBe('https://www.facebook.com');
     expect(probe.probeUrl).toBe('https://www.facebook.com/marketplace/');
+    expect(new FacebookSessionProbe({ browser: manager, surface: 'messenger' }).probeUrl).toBe('https://www.facebook.com/messages/');
+    expect(() => new FacebookSessionProbe({ browser: manager, probePath: 'https://elsewhere.example/messages/' })).toThrow(TypeError);
+    expect(() => new FacebookSessionProbe({ browser: manager, probePath: '//elsewhere.example/messages/' })).toThrow(TypeError);
     expect(manager.getInfo().browserStarted).toBe(false);
     expect(existsSync(profileDir)).toBe(false);
     expect(synthetic.requests).toEqual([]);

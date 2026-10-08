@@ -1,8 +1,9 @@
 import { createServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from 'node:http';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import type { MarketplaceBackend } from './backend.js';
-import { FixtureBackend } from './backend.js';
+import { FixtureBackend, type ConversationBackend, type MarketplaceBackend } from './backend.js';
 import { FacebookMarketplaceBackend } from './facebook-marketplace-backend.js';
 import type { FacebookMarket } from './facebook-marketplace-url.js';
 import { backendNameSchema, SERVICE_VERSION } from './domain.js';
@@ -50,6 +51,12 @@ export interface ServiceOptions {
   /** Internal dependency/test seam; not an environment variable or tool input. */
   facebookCredentials?: FacebookCredentials;
   facebookLoginWaitMs?: number;
+  /** Internal dependency/test seams for the isolated Messenger surface. */
+  messengerEnabled?: boolean;
+  messengerProfileDir?: string;
+  messengerBrowser?: BrowserSessionManager;
+  messengerProbe?: FacebookSessionProbe;
+  messengerBaseUrl?: string;
 }
 
 export interface MarketplaceService {
@@ -60,6 +67,8 @@ export interface MarketplaceService {
   readonly facebook: FacebookSessionProbe;
   readonly reauth: ReauthManager;
   readonly admin: ReauthAdminServer;
+  readonly messengerBrowser?: BrowserSessionManager;
+  readonly messengerProbe?: FacebookSessionProbe;
   close(): Promise<void>;
   address(): ReturnType<HttpServer['address']>;
 }
@@ -97,6 +106,22 @@ export function createMarketplaceService(options: ServiceOptions = {}): Marketpl
     ...(options.facebookBaseUrl !== undefined ? { baseUrl: options.facebookBaseUrl } : {}),
     logger
   });
+  const messengerEnabled = options.messengerEnabled ?? parseMessengerEnabled(process.env.MARKETPLACE_MESSENGER);
+  const messengerBrowser = selectedBackendKind === 'facebook' && messengerEnabled && options.backend === undefined
+    ? (options.messengerBrowser ?? new BrowserSessionManager({
+      profileDir: options.messengerProfileDir ?? process.env.MESSENGER_PROFILE_DIR ?? join(homedir(), '.marketplace', 'browser-profile-messenger'),
+      logger
+    }))
+    : undefined;
+  const messengerProbe = messengerBrowser === undefined
+    ? undefined
+    : (options.messengerProbe ?? new FacebookSessionProbe({
+      browser: messengerBrowser,
+      surface: 'messenger',
+      ...(options.messengerBaseUrl !== undefined ? { baseUrl: options.messengerBaseUrl } : options.facebookBaseUrl !== undefined ? { baseUrl: options.facebookBaseUrl } : {}),
+      logger
+    }));
+  // TODO(#43 follow-up wave): wire the real Facebook Messenger conversation backend; Wave A stays fail-closed.
   // Read here rather than at module load, and only when the Facebook backend can actually use it:
   // a fixture service has no business touching the secret, and must not fail on a half-configured
   // pair. A half-configured pair still fails loudly once the Facebook backend is selected.
@@ -113,6 +138,20 @@ export function createMarketplaceService(options: ServiceOptions = {}): Marketpl
       waitMs: loginWaitMs,
       logger
     });
+  const messengerLogin = credentials === undefined || messengerBrowser === undefined
+    ? undefined
+    : new FacebookCredentialLogin({
+      browser: messengerBrowser,
+      username: credentials.username,
+      password: credentials.password,
+      ...(options.messengerBaseUrl !== undefined
+        ? { baseUrl: options.messengerBaseUrl }
+        : options.facebookBaseUrl !== undefined ? { baseUrl: options.facebookBaseUrl } : {}),
+      waitMs: loginWaitMs,
+      logger
+    });
+  // Wave A creates the isolated credential-login instance, but no Messenger backend consumes it yet.
+  void messengerLogin;
   const backend = options.backend ?? (selectedBackendKind === 'facebook'
     ? new FacebookMarketplaceBackend({
       browser,
@@ -123,6 +162,9 @@ export function createMarketplaceService(options: ServiceOptions = {}): Marketpl
     })
     : new FixtureBackend());
   const backendName = backendNameSchema.parse(backend.name);
+  const conversations: ConversationBackend | undefined = options.backend === undefined && selectedBackendKind === 'facebook'
+    ? undefined
+    : isConversationBackend(backend) ? backend : undefined;
   const adminPort = options.adminPort ?? REAUTH_ADMIN_PORT;
   const viewerPort = options.reauthViewerPort ?? REAUTH_VIEWER_PORT;
   const leaseMs = options.reauthLeaseMs ?? REAUTH_LEASE_MS;
@@ -246,7 +288,8 @@ export function createMarketplaceService(options: ServiceOptions = {}): Marketpl
         backendName,
         backendTimeoutMs,
         shutdownSignal: shutdownController.signal,
-        sessionAssessment: () => toProviderSessionAssessment(browser.getInfo())
+        sessionAssessment: () => toProviderSessionAssessment(browser.getInfo()),
+        conversations
       });
       await mcp.connect(transport);
       await transport.handleRequest(request, response, body);
@@ -284,7 +327,11 @@ export function createMarketplaceService(options: ServiceOptions = {}): Marketpl
         await Promise.allSettled([mcp.close(), transport.close()]);
       }));
       await closing;
-      await browser.close();
+      try {
+        await browser.close();
+      } finally {
+        await messengerBrowser?.close();
+      }
     })();
     return closePromise;
   };
@@ -297,9 +344,16 @@ export function createMarketplaceService(options: ServiceOptions = {}): Marketpl
     facebook,
     reauth,
     admin,
+    ...(messengerBrowser !== undefined ? { messengerBrowser } : {}),
+    ...(messengerProbe !== undefined ? { messengerProbe } : {}),
     address: () => httpServer.address(),
     close
   };
+}
+
+function isConversationBackend(backend: MarketplaceBackend): backend is MarketplaceBackend & ConversationBackend {
+  return typeof (backend as Partial<ConversationBackend>).listThreads === 'function' &&
+    typeof (backend as Partial<ConversationBackend>).readThread === 'function';
 }
 
 function parseHost(value: string | undefined): string {
@@ -308,6 +362,10 @@ function parseHost(value: string | undefined): string {
     throw new Error('HOST must be a non-empty hostname or IP address');
   }
   return host;
+}
+
+export function parseMessengerEnabled(value: string | undefined): boolean {
+  return value === '1';
 }
 
 export function parseBackendKind(value: string | undefined): 'fixture' | 'facebook' {

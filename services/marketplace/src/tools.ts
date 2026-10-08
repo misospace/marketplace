@@ -1,7 +1,7 @@
 import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { CallToolRequestSchema, ErrorCode, ListToolsRequestSchema, McpError } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
-import { ProviderError, type MarketplaceBackend } from './backend.js';
+import { ProviderError, type ConversationBackend, type MarketplaceBackend } from './backend.js';
 import type { ProviderSessionAssessment } from './browser.js';
 import {
   authorizeAction,
@@ -14,6 +14,10 @@ import {
 import {
   fetchInputSchema,
   fetchOutputSchema,
+  threadsListInputSchema,
+  threadsListOutputSchema,
+  threadReadInputSchema,
+  threadReadOutputSchema,
   SCHEMA_VERSION,
   searchInputSchema,
   searchOutputSchema,
@@ -26,6 +30,7 @@ import {
 } from './domain.js';
 
 const marketplaceScope = { provider: 'facebook', account: 'default', surface: 'marketplace' } as const;
+const messengerScope = { provider: 'facebook', account: 'default', surface: 'messenger' } as const;
 
 const TOOLS = [
   {
@@ -48,6 +53,20 @@ const TOOLS = [
     inputSchema: statusInputSchema,
     outputSchema: statusOutputSchema,
     definition: { riskClass: 'read', scope: marketplaceScope }
+  },
+  {
+    name: 'messenger_threads_list',
+    description: 'List recent seller conversation threads from the Facebook Marketplace inbox. Read-only.',
+    inputSchema: threadsListInputSchema,
+    outputSchema: threadsListOutputSchema,
+    definition: { riskClass: 'read', scope: messengerScope }
+  },
+  {
+    name: 'messenger_thread_read',
+    description: 'Read the messages of one marketplace conversation thread by ID. Read-only.',
+    inputSchema: threadReadInputSchema,
+    outputSchema: threadReadOutputSchema,
+    definition: { riskClass: 'read', scope: messengerScope }
   }
 ] as const;
 
@@ -66,6 +85,7 @@ export interface MarketplaceToolOptions {
   /** Per-call host seam for approval grants; receives the validated action request (including the payload digest) so a host can correlate it with its own approval records. Grants must come from the host, never from tool arguments. This service does not issue grants. */
   approvalGrant?: (request: ActionRequest) => unknown;
   authorizer?: ActionAuthorizer;
+  conversations?: ConversationBackend;
 }
 
 export function assertWritableToolsHaveAuthorizer(
@@ -109,7 +129,7 @@ export function registerMarketplaceTools(
     // Validate here instead of returning an MCP tool-error result for malformed arguments.
     const args = request.params.arguments ?? {};
     const parsed = schema.safeParse(args);
-    if (parsed.success && (name === 'marketplace_search' || name === 'marketplace_fetch') && request.params.arguments === undefined) {
+    if (parsed.success && (name === 'marketplace_search' || name === 'marketplace_fetch' || name === 'messenger_thread_read') && request.params.arguments === undefined) {
       throw new McpError(ErrorCode.InvalidParams, 'Tool arguments are required');
     }
     if (!parsed.success) throw new McpError(ErrorCode.InvalidParams, formatValidationError(parsed.error));
@@ -135,8 +155,12 @@ export function registerMarketplaceTools(
       ? searchOutputSchema
       : name === 'marketplace_fetch'
         ? fetchOutputSchema
-        : statusOutputSchema;
-    let validatedOutput: z.infer<typeof searchOutputSchema | typeof fetchOutputSchema | typeof statusOutputSchema>;
+        : name === 'messenger_threads_list'
+          ? threadsListOutputSchema
+          : name === 'messenger_thread_read'
+            ? threadReadOutputSchema
+            : statusOutputSchema;
+    let validatedOutput: z.infer<typeof searchOutputSchema | typeof fetchOutputSchema | typeof statusOutputSchema | typeof threadsListOutputSchema | typeof threadReadOutputSchema>;
     if (!decision.ok) {
       // Refusals parse against the shared runtime failure schema so the uniform refusal shape
       // does not depend on each tool's success-oriented output schema.
@@ -162,6 +186,28 @@ export function registerMarketplaceTools(
           output = listing === null
             ? runtimeFailure('NOT_FOUND', 'No listing matched the supplied identifier.')
             : { ok: true, backend: backendName, listing };
+        } else if (name === 'messenger_threads_list') {
+          const conversations = options.conversations;
+          if (!conversations) throw new ProviderError('UPSTREAM_ERROR', 'The messenger surface is not configured on this deployment.');
+          const threads = await runBackendOperation(
+            (signal) => conversations.listThreads(parsed.data as z.infer<typeof threadsListInputSchema>, signal),
+            backendTimeoutMs,
+            extra.signal,
+            shutdownSignal
+          );
+          output = { ok: true, backend: backendName, threads };
+        } else if (name === 'messenger_thread_read') {
+          const conversations = options.conversations;
+          if (!conversations) throw new ProviderError('UPSTREAM_ERROR', 'The messenger surface is not configured on this deployment.');
+          const thread = await runBackendOperation(
+            (signal) => conversations.readThread(parsed.data as z.infer<typeof threadReadInputSchema>, signal),
+            backendTimeoutMs,
+            extra.signal,
+            shutdownSignal
+          );
+          output = thread === null
+            ? runtimeFailure('NOT_FOUND', 'No conversation thread matched the supplied identifier.')
+            : { ok: true, backend: backendName, thread_id: thread.thread_id, messages: thread.messages };
         } else {
           const sessionAssessment = options.sessionAssessment;
           output = {

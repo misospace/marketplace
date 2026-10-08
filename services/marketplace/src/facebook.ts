@@ -5,8 +5,9 @@ import type { ProviderErrorCode } from './domain.js';
 
 export const FACEBOOK_ORIGIN = 'https://www.facebook.com';
 export const FACEBOOK_MARKETPLACE_PATH = '/marketplace/';
+export const FACEBOOK_MESSENGER_PATH = '/messages/';
 
-export const FACEBOOK_PROBE_OUTCOMES = ['marketplace_authenticated', 'login_required', 'login_redirect', 'checkpoint', 'captcha', 'ambiguous'] as const;
+export const FACEBOOK_PROBE_OUTCOMES = ['marketplace_authenticated', 'messages_authenticated', 'login_required', 'login_redirect', 'checkpoint', 'captcha', 'ambiguous'] as const;
 export type FacebookProbeOutcome = typeof FACEBOOK_PROBE_OUTCOMES[number];
 
 export type FacebookProbeCode = Extract<ProviderErrorCode, 'LOGIN_REQUIRED' | 'CAPTCHA_REQUIRED' | 'SESSION_INVALID'>;
@@ -34,6 +35,8 @@ export interface FacebookPageSnapshot {
 export interface FacebookSessionProbeOptions {
   browser: BrowserSessionManager;
   baseUrl?: string;
+  surface?: 'marketplace' | 'messenger';
+  probePath?: string;
   navigationTimeoutMs?: number;
   settleTimeoutMs?: number;
   logger?: Pick<Console, 'error'>;
@@ -45,6 +48,7 @@ export class FacebookSessionProbe {
   private readonly browser: BrowserSessionManager;
   private readonly navigationTimeoutMs: number;
   private readonly settleTimeoutMs: number;
+  private readonly surface: 'marketplace' | 'messenger';
   private readonly logger: Pick<Console, 'error'>;
 
   constructor(options: FacebookSessionProbeOptions) {
@@ -57,7 +61,13 @@ export class FacebookSessionProbe {
 
     this.browser = options.browser;
     this.baseUrl = normalizeFacebookBaseUrl(options.baseUrl ?? FACEBOOK_ORIGIN);
-    this.probeUrl = new URL(FACEBOOK_MARKETPLACE_PATH, this.baseUrl).href;
+    this.surface = options.surface ?? 'marketplace';
+    if (this.surface !== 'marketplace' && this.surface !== 'messenger') throw new TypeError('surface must be marketplace or messenger');
+    const probePath = options.probePath ?? (this.surface === 'messenger' ? FACEBOOK_MESSENGER_PATH : FACEBOOK_MARKETPLACE_PATH);
+    if (typeof probePath !== 'string' || !probePath.startsWith('/')) throw new TypeError('probePath must start with /');
+    const probeUrl = new URL(probePath, this.baseUrl);
+    if (probeUrl.origin !== this.baseUrl) throw new TypeError('probePath must resolve to the same origin as baseUrl');
+    this.probeUrl = probeUrl.href;
     this.navigationTimeoutMs = options.navigationTimeoutMs ?? 15_000;
     this.settleTimeoutMs = options.settleTimeoutMs ?? 3_000;
     this.logger = options.logger ?? console;
@@ -76,14 +86,15 @@ export class FacebookSessionProbe {
       snapshot = await this.browser.runExclusive(signal, (page) => this.loadSnapshot(page, signal));
     } catch (error) {
       if (error instanceof BrowserUnavailableError || signal.aborted) throw error;
+      const surfaceName = this.surface === 'messenger' ? 'Messenger' : 'Marketplace';
       this.logger.error(
-        'Facebook session probe failed to load the Marketplace page:',
+        `Facebook session probe failed to load the ${surfaceName} page:`,
         error instanceof Error ? error.name : 'UnknownError'
       );
-      throw new ProviderError('UPSTREAM_ERROR', 'The Facebook Marketplace page could not be loaded for the session probe.');
+      throw new ProviderError('UPSTREAM_ERROR', `The Facebook ${surfaceName} page could not be loaded for the session probe.`);
     }
 
-    const result = classifyFacebookSession(snapshot, this.baseUrl);
+    const result = classifyFacebookSession(snapshot, this.baseUrl, this.surface);
     this.browser.assessSession(result.status);
     return result;
   }
@@ -97,7 +108,7 @@ export class FacebookSessionProbe {
 
     let snapshot = await readFacebookPage(page);
     const deadline = Date.now() + this.settleTimeoutMs;
-    while (!hasDecisiveSignal(snapshot, this.baseUrl) && Date.now() < deadline && !signal.aborted) {
+    while (!hasDecisiveSignal(snapshot, this.baseUrl, this.surface) && Date.now() < deadline && !signal.aborted) {
       await new Promise<void>((resolve) => setTimeout(resolve, 100));
       try {
         snapshot = await readFacebookPage(page);
@@ -111,7 +122,11 @@ export class FacebookSessionProbe {
   }
 }
 
-export function classifyFacebookSession(snapshot: FacebookPageSnapshot, baseUrl: string): FacebookSessionProbeResult {
+export function classifyFacebookSession(
+  snapshot: FacebookPageSnapshot,
+  baseUrl: string,
+  surface: 'marketplace' | 'messenger' = 'marketplace'
+): FacebookSessionProbeResult {
   if (snapshot.hasCaptchaFrame || snapshot.mentionsCaptcha) {
     return { status: 'session_needs_reauth', outcome: 'captcha', code: 'CAPTCHA_REQUIRED' };
   }
@@ -125,7 +140,10 @@ export function classifyFacebookSession(snapshot: FacebookPageSnapshot, baseUrl:
       code: 'LOGIN_REQUIRED'
     };
   }
-  if (isMarketplaceUrl(snapshot.url, baseUrl) && snapshot.hasMainLandmark && snapshot.hasMarketplaceLink && snapshot.hasAuthenticatedMarker) {
+  if (surface === 'messenger' && isMessengerUrl(snapshot.url, baseUrl) && snapshot.hasMainLandmark && snapshot.hasAuthenticatedMarker && !snapshot.hasLoginPrompt) {
+    return { status: 'session_usable', outcome: 'messages_authenticated' };
+  }
+  if (surface === 'marketplace' && isMarketplaceUrl(snapshot.url, baseUrl) && snapshot.hasMainLandmark && snapshot.hasMarketplaceLink && snapshot.hasAuthenticatedMarker) {
     return { status: 'session_usable', outcome: 'marketplace_authenticated' };
   }
   if (snapshot.hasLoginPrompt) {
@@ -172,10 +190,12 @@ export async function readFacebookPage(page: Page): Promise<FacebookPageSnapshot
   };
 }
 
-function hasDecisiveSignal(snapshot: FacebookPageSnapshot, baseUrl: string): boolean {
+function hasDecisiveSignal(snapshot: FacebookPageSnapshot, baseUrl: string, surface: 'marketplace' | 'messenger'): boolean {
   return snapshot.hasPasswordInput || snapshot.hasLoginForm || snapshot.hasCheckpointForm || snapshot.hasCaptchaFrame || snapshot.hasLoginPrompt ||
     snapshot.mentionsCheckpoint || snapshot.mentionsCaptcha || isLoginUrl(snapshot.url) || isCheckpointUrl(snapshot.url) ||
-    (isMarketplaceUrl(snapshot.url, baseUrl) && snapshot.hasMainLandmark && snapshot.hasMarketplaceLink && snapshot.hasAuthenticatedMarker);
+    (surface === 'messenger'
+      ? isMessengerUrl(snapshot.url, baseUrl) && snapshot.hasMainLandmark && snapshot.hasAuthenticatedMarker && !snapshot.hasLoginPrompt
+      : isMarketplaceUrl(snapshot.url, baseUrl) && snapshot.hasMainLandmark && snapshot.hasMarketplaceLink && snapshot.hasAuthenticatedMarker);
 }
 
 function isLoginUrl(value: string): boolean {
@@ -193,6 +213,16 @@ function isMarketplaceUrl(value: string, baseUrl: string): boolean {
     const url = new URL(value);
     const base = new URL(baseUrl);
     return url.origin === base.origin && (url.pathname === '/marketplace' || url.pathname.startsWith('/marketplace/'));
+  } catch {
+    return false;
+  }
+}
+
+function isMessengerUrl(value: string, baseUrl: string): boolean {
+  try {
+    const url = new URL(value);
+    const base = new URL(baseUrl);
+    return url.origin === base.origin && url.pathname.startsWith('/messages');
   } catch {
     return false;
   }

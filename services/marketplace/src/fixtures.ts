@@ -1,4 +1,46 @@
-import type { Listing } from './domain.js';
+import type { ConversationMessage, ConversationThread, Listing } from './domain.js';
+
+export const FIXTURE_CONVERSATIONS: readonly {
+  thread: ConversationThread;
+  messages: ConversationMessage[];
+}[] = [
+  {
+    thread: {
+      thread_id: 't-synth-0001',
+      participants: ['Synthetic Seller'],
+      preview: 'Is the bike still available?',
+      item_id: 'fixture-bike-001'
+    },
+    messages: [
+      { sender: 'other', sender_name: 'Synthetic Seller', text: 'Is the bike still available?', sent_at: '2025-03-06T10:00:00.000Z' },
+      { sender: 'you', text: 'Yes, it is available.', sent_at: '2025-03-06T10:05:00.000Z' },
+      { sender: 'other', sender_name: 'Synthetic Seller', text: 'Could I see it this weekend?', sent_at: '2025-03-06T10:10:00.000Z' }
+    ]
+  },
+  {
+    thread: {
+      thread_id: 't-synth-0002',
+      participants: ['Synthetic Buyer'],
+      preview: 'Would you consider a lower price?'
+    },
+    messages: [
+      { sender: 'you', text: 'Thanks for your interest.', sent_at: '2025-03-07T14:00:00.000Z' },
+      { sender: 'other', sender_name: 'Synthetic Buyer', text: 'Would you consider a lower price?', sent_at: '2025-03-07T14:05:00.000Z' }
+    ]
+  },
+  {
+    thread: {
+      thread_id: 't-synth-0003',
+      participants: ['Synthetic Seller'],
+      preview: 'I can pick up the chairs tomorrow.',
+      item_id: 'fixture-chair-002'
+    },
+    messages: [
+      { sender: 'other', sender_name: 'Synthetic Seller', text: 'I can pick up the chairs tomorrow.', sent_at: '2025-03-08T09:00:00.000Z' },
+      { sender: 'you', text: 'Tomorrow works for me.', sent_at: '2025-03-08T09:10:00.000Z' }
+    ]
+  }
+];
 
 export const FIXTURE_LISTINGS: readonly Listing[] = [
   {

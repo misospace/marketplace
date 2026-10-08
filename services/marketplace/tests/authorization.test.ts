@@ -173,6 +173,8 @@ describe('registered tool action boundaries', () => {
   it('declares every registered tool read-only and dispatches through the real MCP server', async () => {
     expect(ACTION_RISK_CLASSES).toEqual(['read', 'prepare', 'send', 'high_consequence']);
     expect(Object.values(TOOL_DEFINITIONS).every(({ riskClass }) => riskClass === 'read')).toBe(true);
+    expect(TOOL_DEFINITIONS.messenger_threads_list.scope).toEqual({ provider: 'facebook', account: 'default', surface: 'messenger' });
+    expect(TOOL_DEFINITIONS.messenger_thread_read.scope).toEqual({ provider: 'facebook', account: 'default', surface: 'messenger' });
 
     const server = new Server({ name: 'authorization-test', version: '1.0.0' }, { capabilities: { tools: {} } });
     const client = new Client({ name: 'authorization-test-client', version: '1.0.0' });
