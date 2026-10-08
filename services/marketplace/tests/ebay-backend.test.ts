@@ -16,7 +16,8 @@ beforeAll(async () => {
   server = createServer((req, res) => {
     const pathname = new URL(req.url ?? '/', 'http://127.0.0.1').pathname;
     lastPath = pathname;
-    lastMarketplaceId = req.headers['x-ebay-c-marketplace-id'] ?? '';
+    const marketplaceHeader = req.headers['x-ebay-c-marketplace-id'];
+    lastMarketplaceId = Array.isArray(marketplaceHeader) ? marketplaceHeader[0] ?? '' : marketplaceHeader ?? '';
     if (pathname.endsWith('/oauth2/token')) { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(fixture('token.json'))); return; }
     if (mode === 'hang') return;
     if (pathname.endsWith('/search')) {
