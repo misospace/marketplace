@@ -63,7 +63,7 @@ const TOOLS = [
   },
   {
     name: 'messenger_thread_read',
-    description: 'Read the messages of one marketplace conversation thread by ID. Read-only.',
+    description: 'Read the messages of one marketplace conversation thread by ID. Read-only, but opening the thread marks it "Seen" for the other participant.',
     inputSchema: threadReadInputSchema,
     outputSchema: threadReadOutputSchema,
     definition: { riskClass: 'read', scope: messengerScope }

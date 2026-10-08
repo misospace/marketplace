@@ -309,7 +309,7 @@ describe('fixture MCP service', () => {
       'Fetch one marketplace listing by ID or canonical URL. Does not fetch remote URLs.',
       'Report service and schema versions, the configured backend name, and the Facebook session state.',
       'List recent seller conversation threads from the Facebook Marketplace inbox. Read-only.',
-      'Read the messages of one marketplace conversation thread by ID. Read-only.'
+      'Read the messages of one marketplace conversation thread by ID. Read-only, but opening the thread marks it "Seen" for the other participant.'
     ]);
     for (const tool of tools.tools) {
       expect(tool.outputSchema).toBeDefined();

@@ -11,6 +11,15 @@ import { buildMessengerThreadUrl } from './facebook-messenger-url.js';
 export type MessengerInboxPageKind = 'captcha' | 'checkpoint' | 'login' | 'threads' | 'empty' | 'unknown';
 export type MessengerThreadPageKind = 'captcha' | 'checkpoint' | 'login' | 'messages' | 'unknown';
 
+function isExpectedPathname(url: string, baseUrl: string, expectedPathname: (pathname: string) => boolean): boolean {
+  try {
+    const parsed = new URL(url);
+    return parsed.origin === new URL(baseUrl).origin && expectedPathname(parsed.pathname);
+  } catch {
+    return false;
+  }
+}
+
 export function classifyMessengerInboxPage(page: ExtractedInboxPage): MessengerInboxPageKind {
   if (page.signals.hasCaptchaFrame || page.signals.mentionsCaptcha) return 'captcha';
   if (page.signals.hasCheckpointForm || page.signals.mentionsCheckpoint) return 'checkpoint';
@@ -28,12 +37,19 @@ export type MessengerInboxOutcome =
 export function interpretMessengerInboxPage(input: {
   page: ExtractedInboxPage;
   baseUrl: string;
+  inboxPath: string;
   limit: number;
 }): MessengerInboxOutcome {
   const kind = classifyMessengerInboxPage(input.page);
   if (kind === 'captcha') return { kind: 'error', code: 'CAPTCHA_REQUIRED', message: 'Facebook requires a captcha challenge.' };
   if (kind === 'checkpoint') return { kind: 'error', code: 'SESSION_INVALID', message: 'The Facebook session requires a security check.' };
   if (kind === 'login') return { kind: 'error', code: 'LOGIN_REQUIRED', message: 'Facebook login is required to read Marketplace conversations.' };
+  // Navigation follows redirects, so the page that rendered may not be the page that was asked
+  // for. Content is only trusted from the configured inbox address; anything else is a typed
+  // error rather than data attributed to the inbox.
+  const inboxPrefix = input.inboxPath.endsWith('/') ? input.inboxPath.slice(0, -1) : input.inboxPath;
+  const atInbox = isExpectedPathname(input.page.url, input.baseUrl, (pathname) => pathname === inboxPrefix || pathname.startsWith(`${inboxPrefix}/`));
+  if (!atInbox) return { kind: 'error', code: 'UPSTREAM_ERROR', message: 'The Facebook Marketplace inbox page was not reached at the expected address.' };
   if (kind === 'unknown') return { kind: 'error', code: 'UPSTREAM_ERROR', message: 'The Facebook Marketplace inbox page layout was not recognized.' };
   if (kind === 'empty') return { kind: 'empty' };
 
@@ -73,12 +89,22 @@ export type MessengerThreadOutcome =
 
 export function interpretMessengerThreadPage(input: {
   page: ExtractedThreadPage;
+  baseUrl: string;
   threadId: string;
 }): MessengerThreadOutcome {
   const kind = classifyMessengerThreadPage(input.page);
   if (kind === 'captcha') return { kind: 'error', code: 'CAPTCHA_REQUIRED', message: 'Facebook requires a captcha challenge.' };
   if (kind === 'checkpoint') return { kind: 'error', code: 'SESSION_INVALID', message: 'The Facebook session requires a security check.' };
   if (kind === 'login') return { kind: 'error', code: 'LOGIN_REQUIRED', message: 'Facebook login is required to read Marketplace conversations.' };
+  // A stale or redirected thread id can land on a different conversation. Messages are only
+  // trusted from the requested thread's own address; anything else is a typed error, never
+  // content attributed to the requested thread.
+  const threadPrefix = `/messages/t/${input.threadId}/`;
+  const atThread = isExpectedPathname(input.page.url, input.baseUrl, (pathname) => {
+    const withoutTrailingSlash = threadPrefix.slice(0, -1);
+    return pathname === withoutTrailingSlash || pathname.startsWith(threadPrefix);
+  });
+  if (!atThread) return { kind: 'error', code: 'UPSTREAM_ERROR', message: 'The Facebook Messenger thread page was not reached at the requested thread.' };
   if (kind === 'unknown') return { kind: 'error', code: 'UPSTREAM_ERROR', message: 'The Facebook Messenger thread page layout was not recognized.' };
 
   const messages: ConversationMessage[] = [];

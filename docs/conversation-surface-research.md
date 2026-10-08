@@ -46,12 +46,17 @@ Because the DOM contract cannot be validated from this repository (synthetic ide
 2. Thread anchors expose usable preview text, and (sometimes) an attached `/marketplace/item/{id}` link.
 3. Thread pages expose `role="row"` elements with the `You said:` / `{Name} said:` aria-label patterns.
 4. The Buying/Selling tab filter (query parameter or click target) — currently the extractor reads whatever the inbox page renders, without selecting a tab.
+5. Whether `/messages/t/{id}` addresses are stable or Facebook canonicalizes them — the redirect guard makes any mismatch loud (`UPSTREAM_ERROR`) rather than attributing the wrong conversation, but the operator should record what actually happens.
 
 **If validation fails:** the extractors fail closed with typed errors, so a wrong assumption degrades to a loud `UPSTREAM_ERROR`, not wrong data. Corrections then land as extractor/fixture updates with the same fail-closed discipline. Until validation passes, these tools should be treated as *contract-shaped but unproven against production* — suitable for Miso integration testing against the fixture backend.
 
 ## Untrusted content
 
 Thread previews and message texts are seller-controlled content. They are returned verbatim (bounded) as tool output; Miso owns interpretation and must treat them as untrusted input — prompt-injection handling is a consumer-side responsibility for reads, and becomes a Musebridge-enforced concern at the send step (#43 step 3), where the approved payload digest binds exactly what will be sent.
+
+## Provider-visible side effects of reads
+
+Reading a thread page in a logged-in session marks it **"Seen"** for the other participant, and the visit may surface presence (as does any facebook.com browsing, including marketplace search — that part is pre-existing and accepted). There is no side-effect-free browser path to reading a Messenger thread, and the send step's delivery reconciliation requires thread reads, so the effect cannot be engineered away — only made explicit. Decision (with the operator): this is a **named exception** to the `read` class's "no external side effect" definition, scoped to provider-side bookkeeping intrinsic to reading the caller's own data. It is recorded in the boundary contract's read-class row and the tool description; `messenger_threads_list` opens no threads and produces no receipts. Redirect hardening (a page is only trusted at its expected address) keeps the visible side effect attached to the conversation actually requested — a redirected navigation is a typed error, never a read of the wrong thread.
 
 ## Deliberate gaps this wave
 

@@ -141,6 +141,7 @@ export class FacebookMessengerBackend implements ConversationBackend {
     const outcome = interpretMessengerInboxPage({
       page: extracted,
       baseUrl: this.probe.baseUrl,
+      inboxPath: this.inboxPath,
       limit: input.limit
     });
     if (outcome.kind === 'error') throw new MarketplaceProviderError(outcome.code, outcome.message);
@@ -196,7 +197,7 @@ export class FacebookMessengerBackend implements ConversationBackend {
       throw new MarketplaceProviderError('UPSTREAM_ERROR', 'The Facebook Messenger thread could not be read.');
     }
 
-    const outcome = interpretMessengerThreadPage({ page: extracted, threadId: input.thread_id });
+    const outcome = interpretMessengerThreadPage({ page: extracted, baseUrl: this.probe.baseUrl, threadId: input.thread_id });
     if (outcome.kind === 'error') throw new MarketplaceProviderError(outcome.code, outcome.message);
     return { thread_id: input.thread_id, messages: [...outcome.messages] };
   }

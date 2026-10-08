@@ -27,6 +27,8 @@ let origin: string;
 let inboxFixture = 'inbox-normal.html';
 let threadFixture = 'thread-normal.html';
 let hangInbox = false;
+let inboxRedirectTarget: string | undefined;
+let threadRedirectTarget: string | undefined;
 const requests: string[] = [];
 const managers: BrowserSessionManager[] = [];
 const profileDirs: string[] = [];
@@ -36,6 +38,18 @@ beforeAll(async () => {
     const pathname = new URL(request.url ?? '/', 'http://127.0.0.1').pathname;
     requests.push(request.url ?? pathname);
     if (hangInbox && pathname === '/marketplace/inbox/') return;
+    // Redirect hooks simulate Facebook canonicalizing or moving an address; the redirect target
+    // is served by the ordinary route table so only the URL assertion can tell the difference.
+    if (inboxRedirectTarget && pathname === '/marketplace/inbox/') {
+      response.writeHead(302, { location: inboxRedirectTarget });
+      response.end();
+      return;
+    }
+    if (threadRedirectTarget && pathname !== threadRedirectTarget && /^\/messages\/t\/[A-Za-z0-9._-]+\/$/.test(pathname)) {
+      response.writeHead(302, { location: threadRedirectTarget });
+      response.end();
+      return;
+    }
     let name: string | undefined;
     if (pathname === '/marketplace/inbox/' || pathname === '/messages/') name = inboxFixture;
     else if (/^\/messages\/t\/[A-Za-z0-9._-]+\/$/.test(pathname)) name = threadFixture;
@@ -65,6 +79,8 @@ afterEach(async () => {
   inboxFixture = 'inbox-normal.html';
   threadFixture = 'thread-normal.html';
   hangInbox = false;
+  inboxRedirectTarget = undefined;
+  threadRedirectTarget = undefined;
 });
 
 function configure(nextInbox = 'inbox-normal.html', nextThread = 'thread-normal.html', nextHangInbox = false): void {
@@ -208,6 +224,36 @@ describe.skipIf(!browserAvailable)('Facebook Messenger backend', () => {
     });
     await expectProviderError(backend.listThreads(listInput(), new AbortController().signal), 'TIMEOUT');
   }, 10_000);
+
+  it('does not trust inbox content served from a redirected address', async () => {
+    configure();
+    const backend = createBackend();
+    vi.spyOn(backend['probe'], 'probeSession').mockResolvedValue({
+      status: 'session_usable', outcome: 'messages_authenticated'
+    });
+    // The redirect target serves the same inbox content; only the final URL can tell the
+    // difference, and trusting it would mean reading whatever page Facebook redirected to.
+    inboxRedirectTarget = '/messages/';
+    await expect(backend.listThreads(listInput(), new AbortController().signal)).rejects.toMatchObject({
+      code: 'UPSTREAM_ERROR',
+      message: 'The Facebook Marketplace inbox page was not reached at the expected address.'
+    });
+    await backend.close();
+  }, 15_000);
+
+  it('does not return another conversation for a redirected thread id', async () => {
+    configure();
+    const backend = createBackend();
+    vi.spyOn(backend['probe'], 'probeSession').mockResolvedValue({
+      status: 'session_usable', outcome: 'messages_authenticated'
+    });
+    threadRedirectTarget = '/messages/t/99999/';
+    await expect(backend.readThread(readInput(), new AbortController().signal)).rejects.toMatchObject({
+      code: 'UPSTREAM_ERROR',
+      message: 'The Facebook Messenger thread page was not reached at the requested thread.'
+    });
+    await backend.close();
+  }, 15_000);
 
   it('validates constructor bounds', () => {
     const backend = createBackend();

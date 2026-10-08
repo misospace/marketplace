@@ -53,13 +53,13 @@ describe('Messenger page interpretation', () => {
       { threadId: '1684432532', preview: 'Synthetic preview', itemId: '123456789' },
       { threadId: '1684432533' }
     ] });
-    expect(interpretMessengerInboxPage({ page, baseUrl: 'https://www.facebook.com', limit: 1 })).toEqual({
+    expect(interpretMessengerInboxPage({ page, baseUrl: 'https://www.facebook.com', limit: 1, inboxPath: '/marketplace/inbox/' })).toEqual({
       kind: 'threads',
       threads: [{ thread_id: '1684432532', preview: 'Synthetic preview', item_id: '123456789' }]
     });
-    expect(interpretMessengerInboxPage({ page: inbox({ hasEmptyStateMarker: true }), baseUrl: 'https://www.facebook.com', limit: 1 }))
+    expect(interpretMessengerInboxPage({ page: inbox({ hasEmptyStateMarker: true }), baseUrl: 'https://www.facebook.com', limit: 1, inboxPath: '/marketplace/inbox/' }))
       .toEqual({ kind: 'empty' });
-    expect(interpretMessengerInboxPage({ page: inbox(), baseUrl: 'https://www.facebook.com', limit: 1 }))
+    expect(interpretMessengerInboxPage({ page: inbox(), baseUrl: 'https://www.facebook.com', limit: 1, inboxPath: '/marketplace/inbox/' }))
       .toMatchObject({ kind: 'error', code: 'UPSTREAM_ERROR', message: 'The Facebook Marketplace inbox page layout was not recognized.' });
   });
 
@@ -77,6 +77,7 @@ describe('Messenger page interpretation', () => {
         { text: 'Unattributed must not be mapped' },
         { sender: 'other', senderName: ' ', text: 'bad optional name' }
       ] }),
+      baseUrl: 'https://www.facebook.com',
       threadId: '1684432532'
     });
     expect(outcome).toEqual({ kind: 'messages', messages: [
@@ -84,8 +85,28 @@ describe('Messenger page interpretation', () => {
       { sender: 'you', text: 'Thanks' },
       { sender: 'other', text: 'bad optional name' }
     ] });
-    expect(interpretMessengerThreadPage({ page: thread(), threadId: '1684432532' })).toMatchObject({
+    expect(interpretMessengerThreadPage({ page: thread(), baseUrl: 'https://www.facebook.com', threadId: '1684432532' })).toMatchObject({
       kind: 'error', code: 'UPSTREAM_ERROR', message: 'The Facebook Messenger thread page layout was not recognized.'
     });
+  });
+
+  it('does not trust content from a redirected address, but login still wins on a redirected login page', () => {
+    const inboxElsewhere = inbox({ url: 'https://www.facebook.com/messages/' });
+    expect(interpretMessengerInboxPage({ page: inboxElsewhere, baseUrl: 'https://www.facebook.com', inboxPath: '/marketplace/inbox/', limit: 1 }))
+      .toMatchObject({ kind: 'error', code: 'UPSTREAM_ERROR', message: 'The Facebook Marketplace inbox page was not reached at the expected address.' });
+    // A redirect to a login page must still be reported as the login requirement it is.
+    expect(interpretMessengerInboxPage({
+      page: inbox({ url: 'https://www.facebook.com/login/', signals: { ...authenticatedSignals, hasLoginForm: true } }),
+      baseUrl: 'https://www.facebook.com',
+      inboxPath: '/marketplace/inbox/',
+      limit: 1
+    })).toMatchObject({ kind: 'error', code: 'LOGIN_REQUIRED' });
+    // A stale thread id that Facebook redirects to another conversation is never attributed.
+    const otherThread = thread({ url: 'https://www.facebook.com/messages/t/99999/' });
+    expect(interpretMessengerThreadPage({
+      page: otherThread,
+      baseUrl: 'https://www.facebook.com',
+      threadId: '1684432532'
+    })).toMatchObject({ kind: 'error', code: 'UPSTREAM_ERROR', message: 'The Facebook Messenger thread page was not reached at the requested thread.' });
   });
 });
