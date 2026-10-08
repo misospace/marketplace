@@ -204,8 +204,11 @@ describe.skipIf(!browserAvailable)('Facebook credential login', () => {
     const probe = new FacebookSessionProbe({ browser: manager, baseUrl: server.origin, navigationTimeoutMs: 2_000, settleTimeoutMs: 150 });
     // Warm the browser before the deadline starts. The invariant under test is the deadline vs
     // approval relationship, not launch latency, and a cold Chromium launch is not abortable by
-    // the search signal -- on the warmed browser the form submits within milliseconds.
+    // the search signal -- on the warmed browser the form submits within milliseconds. The probe
+    // must not record a usable session: the search below has to be the step that triggers the
+    // credential login.
     await probe.probeSession(new AbortController().signal);
+    expect(manager.getInfo().status).not.toBe('session_usable');
     const backend = new FacebookMarketplaceBackend({ browser: manager, probe, login, logger: { error: () => undefined } });
     const operation = runBackendOperation(
       (signal) => backend.search({ query: 'bike', location: 'NYC', limit: 5 }, signal),
