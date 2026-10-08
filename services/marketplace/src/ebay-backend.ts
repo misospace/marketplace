@@ -5,9 +5,12 @@ import { EbayClient, EbayHttpError, type EbayClientOptions } from './ebay.js';
 export class EbayShoppingBackend implements ShoppingBackend {
   readonly name = 'ebay';
   private readonly client: EbayClient;
+  private readonly requestTimeoutMs: number;
 
-  constructor(client: EbayClient | EbayClientOptions) {
+  constructor(client: EbayClient | EbayClientOptions, options: { requestTimeoutMs?: number } = {}) {
     this.client = client instanceof EbayClient ? client : new EbayClient(client);
+    this.requestTimeoutMs = options.requestTimeoutMs ?? 15_000;
+    validateTimeout(this.requestTimeoutMs, 'requestTimeoutMs');
   }
 
   async search(input: Parameters<ShoppingBackend['search']>[0], signal: AbortSignal): Promise<ProductOffer[]> {
@@ -35,7 +38,12 @@ export class EbayShoppingBackend implements ShoppingBackend {
         const offer = mapOffer(item, true);
         if (!offer) throw new ProviderError('UPSTREAM_ERROR', 'The eBay item could not be mapped to a product offer.');
         return offer;
-      } catch (error) { throw mapError(error); }
+      } catch (error) {
+        // A missing item is the house "no result" case: return null and let the tool layer
+        // report NOT_FOUND, mirroring the other backends.
+        if (error instanceof EbayHttpError && error.status === 404) return null;
+        throw mapError(error);
+      }
     });
   }
 
@@ -44,7 +52,7 @@ export class EbayShoppingBackend implements ShoppingBackend {
     const controller = new AbortController();
     const abort = () => controller.abort(signal.reason);
     signal.addEventListener('abort', abort, { once: true });
-    const timer = setTimeout(() => controller.abort(new Error('deadline exceeded')), 15_000);
+    const timer = setTimeout(() => controller.abort(new Error('deadline exceeded')), this.requestTimeoutMs);
     try {
       return await Promise.race([
         operation(controller.signal),
@@ -62,12 +70,7 @@ function mapError(error: unknown): ProviderError {
   if (error instanceof ProviderError) return error;
   if (error instanceof EbayHttpError) {
     if (error.status === 401) return new ProviderError('AUTH_EXPIRED', 'eBay authentication has expired.');
-    if (error.status === 404) {
-      const notFound = new ProviderError('UPSTREAM_ERROR', 'The eBay item was not found.');
-      // NOT_FOUND is a runtime error code, though not part of ProviderError's provider-code union.
-      Object.defineProperty(notFound, 'code', { value: 'NOT_FOUND' });
-      return notFound;
-    }
+    if (error.status === 404) return new ProviderError('UPSTREAM_ERROR', 'The eBay item was not found.');
     if (error.status === 429) return new ProviderError('RATE_LIMITED', 'eBay rate limit was reached.', error.retryAfter === undefined ? {} : { retry_after: error.retryAfter });
     return new ProviderError('UPSTREAM_ERROR', 'The eBay request failed.');
   }
@@ -98,7 +101,8 @@ function mapOffer(value: unknown, detail: boolean): ProductOffer | null {
     availability: detail ? (typeof item.estimatedAvailableQuantity === 'number' ? item.estimatedAvailableQuantity > 0 ? 'in_stock' : 'out_of_stock' : 'unknown') : 'unknown',
     shipping_cost: shipping === undefined ? null : shippingCost,
     shipping_currency: shipping === undefined ? null : shipping.shippingCost?.currency ?? null,
-    location, seller: null, posted_at: null, updated_at: null,
+    location, seller: typeof item.seller?.username === 'string' && item.seller.username ? { name: item.seller.username } : null,
+    posted_at: null, updated_at: null,
     images: [item.image?.imageUrl, ...(Array.isArray(item.additionalImages) ? item.additionalImages.map((image: any) => image?.imageUrl) : [])].filter((image): image is string => typeof image === 'string').slice(0, 6),
     state: Number.isFinite(end) && end <= Date.now() ? 'unknown' : 'active'
   };
@@ -122,4 +126,8 @@ function condition(value: unknown): ProductOffer['condition'] {
   if (lower.includes('new')) return 'new';
   if (lower.includes('used') || lower.includes('pre-owned') || lower.includes('open box')) return 'used';
   return 'unknown';
+}
+
+function validateTimeout(value: number, name: string): void {
+  if (!Number.isInteger(value) || value <= 0) throw new RangeError(`${name} must be a positive integer`);
 }

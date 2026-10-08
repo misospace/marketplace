@@ -53,9 +53,9 @@ describe('EbayShoppingBackend', () => {
     mode = 'missing-url';
     await expect(backend().fetch(shoppingFetchInputSchema.parse({ id: '123' }), signal())).rejects.toMatchObject({ code: 'UPSTREAM_ERROR' });
   });
-  it('maps a 404 to NOT_FOUND', async () => {
+  it('maps a 404 to the house no-result case so the tool layer reports NOT_FOUND', async () => {
     mode = 'not-found';
-    await expect(backend().fetch(shoppingFetchInputSchema.parse({ id: '123' }), signal())).rejects.toMatchObject({ name: 'ProviderError', code: 'NOT_FOUND' });
+    await expect(backend().fetch(shoppingFetchInputSchema.parse({ id: '123' }), signal())).resolves.toBeNull();
     expect(ProviderError).toBeDefined();
   });
   it('honors an already-aborted signal as TIMEOUT', async () => {
