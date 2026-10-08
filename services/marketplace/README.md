@@ -108,6 +108,6 @@ npm test
 npm run lint
 ```
 
-The source package, tests, scripts, and TypeScript configs now live under `services/marketplace`. Hosts that mounted the old source, `tests`, or `dist` paths must update those paths to `services/marketplace/src`, `services/marketplace/tests`, and `services/marketplace/dist`; `npm start` and the runtime path inside the container remain unchanged. The image remains `ghcr.io/misospace/marketplace` with pinned `v*` tags. Coordinate any future image, profile, or tag changes with the service owner.
+The source package, tests, scripts, and TypeScript configs now live under `services/marketplace`. Hosts that mounted the old source, `tests`, or `dist` paths must update those paths to `services/marketplace/src`, `services/marketplace/tests`, and `services/marketplace/dist`. Root-level `npm start` remains supported; hosts that launched the file directly must change `node dist/index.js` to `node services/marketplace/dist/index.js`. The container entry remains `/app/dist/index.js`. The image remains `ghcr.io/misospace/marketplace`; image tags (`main`, SHA, and semantic version) remain unchanged, with Git release tags matching `v*.*.*`. Coordinate any future image, profile, or tag changes with the service owner.
 
 The stale release PR #21 must be regenerated after this monorepo change merges; it must not be auto-merged.
