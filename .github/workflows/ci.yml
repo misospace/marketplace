@@ -39,7 +39,11 @@ jobs:
       - name: Install dependencies
         run: npm ci --ignore-scripts
       - name: Install Chromium
-        run: npx playwright install --with-deps chromium
+        # No --with-deps: GitHub-hosted ubuntu runners already ship the shared libraries Chromium
+        # needs, and the dependency pass costs ~5 minutes downloading font packages from a slow
+        # mirror. These tests assert on ARIA roles and DOM structure, never rendered output, so
+        # font coverage is not load-bearing. A missing library fails the Chromium launch loudly.
+        run: npx playwright install chromium
       - name: Typecheck
         run: npm run typecheck
       - name: Lint
@@ -86,7 +90,7 @@ jobs:
   # publish job reuses the `checks` job above instead of duplicating them in a second workflow.
   publish:
     name: Publish to GHCR
-    needs: checks
+    needs: [actionlint, checks, docker]
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-latest
     permissions:
