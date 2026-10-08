@@ -13,9 +13,10 @@ import { chromium } from 'playwright';
 import { BrowserSessionManager } from '../src/browser.js';
 import { ProviderError } from '../src/index.js';
 import { facebookCredentialsFromEnv } from '../src/facebook-login.js';
-import { createMarketplaceService, type MarketplaceService, parseBackendKind, parseBackendTimeout, parseLoginWaitMs } from '../src/service.js';
+import { createMarketplaceService, type MarketplaceService, parseBackendKind, parseBackendTimeout, parseLoginWaitMs, parseMessengerEnabled } from '../src/service.js';
 import * as packageEntry from '../src/index.js';
 import { runBackendOperation } from '../src/tools.js';
+import { threadsListInputSchema, threadReadInputSchema } from '../src/domain.js';
 import { FakeReauthRuntime } from './helpers/fake-reauth-runtime.js';
 
 let service: MarketplaceService;
@@ -92,6 +93,16 @@ afterEach(async () => {
 });
 
 describe('fixture MCP service', () => {
+  it('validates conversation inputs and applies the default thread limit', () => {
+    expect(threadsListInputSchema.parse({})).toEqual({ limit: 10 });
+    expect(threadsListInputSchema.parse({ limit: 20 })).toEqual({ limit: 20 });
+    expect(threadsListInputSchema.safeParse({ limit: 0 }).success).toBe(false);
+    expect(threadsListInputSchema.safeParse({ limit: 21 }).success).toBe(false);
+    expect(threadReadInputSchema.safeParse({ thread_id: 'thread-1.ok_2' }).success).toBe(true);
+    expect(threadReadInputSchema.safeParse({ thread_id: 'thread/1' }).success).toBe(false);
+    expect(threadReadInputSchema.safeParse({ thread_id: 'éclair' }).success).toBe(false);
+  });
+
   it.skipIf(!browserAvailable)('serves the reauth console endpoints end-to-end on loopback', async () => {
     await Promise.allSettled(clients.splice(0).map((client) => client.close()));
     await service.close();
@@ -290,11 +301,15 @@ describe('fixture MCP service', () => {
     const client = await connectClient();
     expect(client.getServerVersion()).toEqual({ name: 'marketplace', version: '0.1.0' });
     const tools = await client.listTools();
-    expect(tools.tools.map(({ name }) => name)).toEqual(['marketplace_search', 'marketplace_fetch', 'marketplace_status']);
+    expect(tools.tools.map(({ name }) => name)).toEqual([
+      'marketplace_search', 'marketplace_fetch', 'marketplace_status', 'messenger_threads_list', 'messenger_thread_read'
+    ]);
     expect(tools.tools.map(({ description }) => description)).toEqual([
       'Search marketplace listings.',
       'Fetch one marketplace listing by ID or canonical URL. Does not fetch remote URLs.',
-      'Report service and schema versions, the configured backend name, and the Facebook session state.'
+      'Report service and schema versions, the configured backend name, and the Facebook session state.',
+      'List recent seller conversation threads from the Facebook Marketplace inbox. Read-only.',
+      'Read the messages of one marketplace conversation thread by ID. Read-only, but opening the thread marks it "Seen" for the other participant.'
     ]);
     for (const tool of tools.tools) {
       expect(tool.outputSchema).toBeDefined();
@@ -328,6 +343,19 @@ describe('fixture MCP service', () => {
     const output = structured(result);
     expect(output.backend).toBe('fixture');
     expect(output.listings.map((listing: { id: string }) => listing.id)).toEqual(['fixture-bike-001']);
+    const threads = structured(await client.callTool({ name: 'messenger_threads_list' }));
+    expect(threads.backend).toBe('fixture');
+    expect(threads.threads.map((thread: { thread_id: string }) => thread.thread_id)).toEqual(['t-synth-0001', 't-synth-0002', 't-synth-0003']);
+    expect(threads.threads[0].item_id).toBe('fixture-bike-001');
+    expect(structured(await client.callTool({ name: 'messenger_threads_list', arguments: { limit: 1 } })).threads)
+      .toHaveLength(1);
+    const thread = structured(await client.callTool({ name: 'messenger_thread_read', arguments: { thread_id: 't-synth-0001' } }));
+    expect(thread.messages).toHaveLength(3);
+    expect(thread.messages[0].sender).toBe('other');
+    expect(structured(await client.callTool({ name: 'messenger_thread_read', arguments: { thread_id: 't-synth-missing' } }))).toEqual({
+      ok: false,
+      error: { code: 'NOT_FOUND', message: 'No conversation thread matched the supplied identifier.' }
+    });
     expect(z.toJSONSchema(z.object({ value: z.string() })).type).toBe('object');
   });
 
@@ -373,6 +401,54 @@ describe('fixture MCP service', () => {
     expect(service.browser.getInfo().browserStarted).toBe(false);
   });
 
+  it('creates an isolated Messenger probe/profile only when enabled for Facebook', async () => {
+    await Promise.allSettled(clients.splice(0).map((client) => client.close()));
+    await service.close();
+    const profileRoot = mkdtempSync(join(tmpdir(), 'marketplace-messenger-profile-'));
+    try {
+      service = createMarketplaceService({
+        host: '127.0.0.1',
+        port: 0,
+        adminPort: 0,
+        backendKind: 'facebook',
+        messengerEnabled: true,
+        messengerProfileDir: join(profileRoot, 'messenger'),
+        facebookBaseUrl: 'http://127.0.0.1:3210'
+      });
+      expect(service.messengerBrowser).toBeDefined();
+      expect(service.messengerBrowser).not.toBe(service.browser);
+      expect(service.messengerBrowser?.profileDir).toBe(join(profileRoot, 'messenger'));
+      expect(service.messengerProbe?.probeUrl).toBe('http://127.0.0.1:3210/messages/');
+      expect(service.browser.profileDir).not.toBe(service.messengerBrowser?.profileDir);
+    } finally {
+      await service.close();
+      rmSync(profileRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a messenger profile directory that resolves to the marketplace profile', () => {
+    const profileRoot = mkdtempSync(join(tmpdir(), 'marketplace-messenger-profile-'));
+    try {
+      const shared = join(profileRoot, 'shared');
+      // Two scopes on one profile would share cookies and one session assessment, so the
+      // conflict must fail startup — including when the same directory is spelled differently.
+      expect(() => createMarketplaceService({
+        backendKind: 'facebook',
+        messengerEnabled: true,
+        browserProfileDir: shared,
+        messengerProfileDir: shared
+      })).toThrow('The messenger scope must not share the marketplace browser profile directory');
+      expect(() => createMarketplaceService({
+        backendKind: 'facebook',
+        messengerEnabled: true,
+        browserProfileDir: shared,
+        messengerProfileDir: `${shared}/.`
+      })).toThrow('The messenger scope must not share the marketplace browser profile directory');
+    } finally {
+      rmSync(profileRoot, { recursive: true, force: true });
+    }
+  });
+
   it('selects the fixture backend by default and supports explicit Facebook selection', async () => {
     expect(structured(await (await connectClient()).callTool({ name: 'marketplace_status', arguments: {} })).backend).toBe('fixture');
     await Promise.allSettled(clients.splice(0).map((client) => client.close()));
@@ -407,6 +483,13 @@ describe('fixture MCP service', () => {
     expect(parseBackendKind('fixture')).toBe('fixture');
     expect(parseBackendKind('facebook')).toBe('facebook');
     expect(() => parseBackendKind('other')).toThrow(new RangeError('MARKETPLACE_BACKEND must be either "fixture" or "facebook"'));
+  });
+
+  it('enables Messenger only for MARKETPLACE_MESSENGER=1', () => {
+    expect(parseMessengerEnabled(undefined)).toBe(false);
+    expect(parseMessengerEnabled('1')).toBe(true);
+    expect(parseMessengerEnabled('true')).toBe(false);
+    expect(parseMessengerEnabled('0')).toBe(false);
   });
 
   it('returns status versions and fixture marker without invoking backend operations', async () => {
@@ -589,7 +672,16 @@ describe('fixture MCP service', () => {
       ['marketplace_fetch', { url: 'https://example.com', extra: true }],
       ['marketplace_fetch', { url: `https://example.com/${'x'.repeat(2040)}` }],
       ['marketplace_status', { extra: true }],
-      ['marketplace_status', null]
+      ['marketplace_status', null],
+      ['messenger_threads_list', { limit: 0 }],
+      ['messenger_threads_list', { limit: 21 }],
+      ['messenger_threads_list', { extra: true }],
+      ['messenger_thread_read', undefined],
+      ['messenger_thread_read', {}],
+      ['messenger_thread_read', { thread_id: 'bad/id' }],
+      ['messenger_thread_read', { thread_id: 'éclair' }],
+      ['messenger_thread_read', { thread_id: 'x'.repeat(129) }],
+      ['messenger_thread_read', { thread_id: 't-synth-0001', extra: true }]
     ];
     for (const [name, argumentsValue] of invalidArguments) {
       let response: { status: number; body: any };
@@ -764,6 +856,28 @@ describe('fixture MCP service', () => {
     expect(result.body.result.structuredContent).toEqual({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'The backend could not complete the request.' } });
     expect(JSON.stringify(result.body)).not.toContain('data:text');
     expect(logger.error).toHaveBeenCalledOnce();
+  });
+
+  it('returns typed not-configured Messenger failures without logging internal errors', async () => {
+    await Promise.allSettled(clients.splice(0).map((client) => client.close()));
+    await service.close();
+    const logger = { error: vi.fn() };
+    service = createMarketplaceService({
+      host: '127.0.0.1',
+      port: 0,
+      adminPort: 0,
+      backendKind: 'facebook',
+      messengerEnabled: false,
+      logger
+    });
+    await packageEntry.listen(service);
+    const address = service.address();
+    if (!address || typeof address === 'string') throw new Error('Expected a TCP address');
+    baseUrl = `http://127.0.0.1:${address.port}`;
+
+    const result = structured(await (await connectClient()).callTool({ name: 'messenger_threads_list' }));
+    expect(result).toEqual({ ok: false, error: { code: 'UPSTREAM_ERROR', message: 'The messenger surface is not configured on this deployment.' } });
+    expect(logger.error).not.toHaveBeenCalled();
   });
 
   it('returns typed provider failures with validated metadata through the SDK', async () => {

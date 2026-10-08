@@ -6,6 +6,7 @@ export const SERVICE_VERSION = '0.1.0';
 export const MAX_QUERY_LENGTH = 256;
 export const MAX_LOCATION_LENGTH = 256;
 export const MAX_LISTING_ID_LENGTH = 128;
+export const MAX_THREAD_ID_LENGTH = 128;
 export const MAX_BACKEND_NAME_LENGTH = 64;
 export const MAX_PROVIDER_ERROR_MESSAGE_LENGTH = 256;
 export const MAX_PROVIDER_ACTION_LENGTH = 128;
@@ -32,6 +33,8 @@ const httpUrlSchema = z.string().max(2048).url().regex(/^[Hh][Tt][Tt][Pp][Ss]?:\
 }, 'Must be an HTTP(S) URL');
 
 const isoDateTimeSchema = z.string().datetime({ offset: true });
+const threadIdSchema = z.string().trim().min(1).max(MAX_THREAD_ID_LENGTH).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/);
+const listingIdSchema = z.string().min(1).max(MAX_LISTING_ID_LENGTH);
 
 export const sellerSchema = z.object({
   id: z.string().min(1).max(128).optional(),
@@ -56,6 +59,26 @@ export const listingSchema = z.object({
 
 export type Listing = z.infer<typeof listingSchema>;
 
+const conversationThreadIdSchema = threadIdSchema;
+
+export const conversationThreadSchema = z.object({
+  thread_id: conversationThreadIdSchema,
+  participants: z.array(z.string().min(1).max(128)).max(8).optional(),
+  preview: z.string().min(1).max(280).optional(),
+  item_id: listingIdSchema.optional()
+}).strict();
+
+export const conversationMessageSchema = z.object({
+  sender: z.enum(['you', 'other']).optional(),
+  sender_name: z.string().min(1).max(128).optional(),
+  text: z.string().min(1).max(2000),
+  sent_at: isoDateTimeSchema.optional()
+}).strict();
+
+export type ConversationThread = z.infer<typeof conversationThreadSchema>;
+export type ConversationMessage = z.infer<typeof conversationMessageSchema>;
+export type ConversationThreadMessages = { thread_id: string; messages: ConversationMessage[] };
+
 export const searchInputSchema = z.object({
   query: z.string().trim().min(1).max(MAX_QUERY_LENGTH).regex(/\S/),
   location: z.string().trim().min(1).max(MAX_LOCATION_LENGTH).regex(/\S/),
@@ -74,6 +97,17 @@ export const fetchInputSchema = z.object({
 });
 
 export const statusInputSchema = z.object({}).strict();
+
+export const threadsListInputSchema = z.object({
+  limit: z.number().int().min(1).max(20).default(10)
+}).strict();
+
+export const threadReadInputSchema = z.object({
+  thread_id: conversationThreadIdSchema
+}).strict();
+
+export type ThreadsListInput = z.infer<typeof threadsListInputSchema>;
+export type ThreadReadInput = z.infer<typeof threadReadInputSchema>;
 
 export const runtimeErrorCodeSchema = z.enum([
   ...PROVIDER_ERROR_CODES,
@@ -133,6 +167,23 @@ export const statusSuccessSchema = z.object({
 export const searchOutputSchema = z.union([searchSuccessSchema, runtimeFailureSchema]);
 export const fetchOutputSchema = z.union([fetchSuccessSchema, runtimeFailureSchema]);
 export const statusOutputSchema = statusSuccessSchema;
+export const threadsListOutputSchema = z.union([
+  z.object({
+    ok: z.literal(true),
+    backend: backendNameSchema,
+    threads: z.array(conversationThreadSchema).max(20)
+  }).strict(),
+  runtimeFailureSchema
+]);
+export const threadReadOutputSchema = z.union([
+  z.object({
+    ok: z.literal(true),
+    backend: backendNameSchema,
+    thread_id: conversationThreadIdSchema,
+    messages: z.array(conversationMessageSchema).max(50)
+  }).strict(),
+  runtimeFailureSchema
+]);
 export type RuntimeFailure = z.infer<typeof runtimeFailureSchema>;
 export type ProviderErrorCode = typeof PROVIDER_ERROR_CODES[number];
 export type ProviderErrorMetadata = z.infer<typeof providerErrorMetadataSchema>;

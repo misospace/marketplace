@@ -1,19 +1,30 @@
 import { z } from 'zod';
 import {
   fetchInputSchema,
+  threadsListInputSchema,
+  threadReadInputSchema,
   providerErrorMetadataSchema,
   providerErrorSchema,
   searchInputSchema,
   type Listing,
+  type ConversationMessage,
+  type ConversationThread,
+  type ConversationThreadMessages,
   type ProviderErrorCode,
   type ProviderErrorMetadata
 } from './domain.js';
-import { FIXTURE_LISTINGS } from './fixtures.js';
+import { FIXTURE_CONVERSATIONS, FIXTURE_LISTINGS } from './fixtures.js';
 
 export interface MarketplaceBackend {
   readonly name: string;
   search(input: ReturnType<typeof searchInputSchema.parse>, signal: AbortSignal): Promise<Listing[]> | Listing[];
   fetch(input: ReturnType<typeof fetchInputSchema.parse>, signal: AbortSignal): Promise<Listing | null> | Listing | null;
+}
+
+export interface ConversationBackend {
+  readonly name: string;
+  listThreads(input: ReturnType<typeof threadsListInputSchema.parse>, signal: AbortSignal): Promise<ConversationThread[]> | ConversationThread[];
+  readThread(input: ReturnType<typeof threadReadInputSchema.parse>, signal: AbortSignal): Promise<ConversationThreadMessages | null> | ConversationThreadMessages | null;
 }
 
 export class ProviderError extends Error {
@@ -31,7 +42,7 @@ export class ProviderError extends Error {
   }
 }
 
-export class FixtureBackend implements MarketplaceBackend {
+export class FixtureBackend implements MarketplaceBackend, ConversationBackend {
   readonly name = 'fixture';
 
   constructor(private readonly listings: readonly Listing[] = FIXTURE_LISTINGS) {}
@@ -56,6 +67,19 @@ export class FixtureBackend implements MarketplaceBackend {
 
     const canonicalTarget = canonicalHttpUrl(input.url!);
     return this.listings.find((listing) => canonicalHttpUrl(listing.url) === canonicalTarget) ?? null;
+  }
+
+  listThreads(input: ReturnType<typeof threadsListInputSchema.parse>, _signal: AbortSignal): ConversationThread[] {
+    return FIXTURE_CONVERSATIONS.slice(0, input.limit).map(({ thread }) => thread);
+  }
+
+  readThread(input: ReturnType<typeof threadReadInputSchema.parse>, _signal: AbortSignal): ConversationThreadMessages | null {
+    const conversation = FIXTURE_CONVERSATIONS.find(({ thread }) => thread.thread_id === input.thread_id);
+    if (!conversation) return null;
+    return {
+      thread_id: conversation.thread.thread_id,
+      messages: conversation.messages
+    };
   }
 }
 

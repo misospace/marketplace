@@ -20,7 +20,7 @@ A **session scope** is the triple `(provider, account, surface)`:
 
 - **provider** — the external service identity (e.g. `facebook`).
 - **account** — one login identity on that provider (today: `default`; multiple accounts require distinct scope values, not shared state).
-- **surface** — one product area on the provider (e.g. `marketplace`, `messenger`). **Never assume one Facebook session is safe for every Meta surface.** A Marketplace session grants nothing on Messenger; each surface gets its own session assessment, its own reauth flow, and its own browser profile directory. The current service uses a single profile because it serves a single scope (`facebook` / `default` / `marketplace`); before a second surface goes live (#43), each scope must map to its own profile directory, with the existing default directory assigned to the marketplace scope.
+- **surface** — one product area on the provider (e.g. `marketplace`, `messenger`). **Never assume one Facebook session is safe for every Meta surface.** A Marketplace session grants nothing on Messenger; each surface gets its own session assessment, its own reauth flow, and its own browser profile directory. Each scope maps to its own profile directory — the existing default directory (`BROWSER_PROFILE_DIR`, default `$HOME/.marketplace/browser-profile`) belongs to the marketplace scope, and the messenger scope has its own (`MESSENGER_PROFILE_DIR`, default `$HOME/.marketplace/browser-profile-messenger`). The messenger surface is opt-in (`MARKETPLACE_MESSENGER=1`) and does not yet have an interactive reauth flow; a captcha or checkpoint on that profile surfaces as a typed provider error and requires manual profile recovery until the send step wires per-scope reauth.
 
 Invariants carried over from the existing service and preserved per scope:
 
@@ -36,12 +36,12 @@ Every registered MCP tool declares exactly one risk class and the session scope 
 
 | Class | Meaning | Autonomy | Enforcement |
 |---|---|---|---|
-| `read` | No external side effect, no disclosure beyond the caller's own data | Autonomous | Declared scope; no grant. Scope is enforced as declaration metadata; session validation remains the provider backend's responsibility (search/fetch already fail closed on `session_unknown`) until a second surface exists |
+| `read` | No external side effect beyond a narrow, named exception: provider-side bookkeeping that is intrinsic to reading the caller's own data (today: Messenger read receipts — opening a thread marks it "Seen", which the other participant can see). Anything that discloses content, delivers a message, or changes state the counterpart observes beyond that bookkeeping is not `read`. | Autonomous | Declared scope; no grant. The scope selects the browser profile and probe the tool's backend uses, and each surface's backend validates its own session, failing closed on `session_unknown` (search/fetch and the conversation reads all do this) |
 | `prepare` | Builds a draft/artifact with no external effect (e.g. a message draft) | Autonomous, but its output is **not** authorization to send | Same as `read`; no grant |
 | `send` | Delivers content to an external party (e.g. sends a seller message) | Never autonomous | Valid scope **and** a single-use, issuance-authenticated approval grant bound to the exact payload, verified and consumed atomically before execution (no production send path exists today) |
 | `high_consequence` | Purchases, payments, sharing private data, hard commitments | Never | Refused unconditionally. No grant can enable it; enabling it later requires changing this gate explicitly, not presenting a better grant |
 
-Registered today: `marketplace_search`, `marketplace_fetch`, `marketplace_status` — all `read`. The registry is derived from the tool declarations themselves, so a tool cannot exist without a risk class.
+Registered today: `marketplace_search`, `marketplace_fetch`, `marketplace_status` (scope `marketplace`) and `messenger_threads_list`, `messenger_thread_read` (scope `messenger`) — all `read`. The registry is derived from the tool declarations themselves, so a tool cannot exist without a risk class.
 
 ## Approval grants
 
@@ -83,7 +83,7 @@ Authorization refusals are normal, non-exceptional tool responses — `{ ok: fal
 ## Migration path from the read-only connector
 
 1. **This change (#41):** gate, risk classes, scope declarations, grant verifier, tests. Registered tools are all `read`; deployed Marketplace consumers see zero behavior change.
-2. **#43 step 1 — conversation reads:** new `read` tools for seller threads/messages under a `messenger` surface scope with their own session assessment and profile directory. No approval needed; still no external effect.
+2. **#43 step 1 — conversation reads (this change):** `messenger_threads_list` and `messenger_thread_read` are `read` tools under the `messenger` surface scope with their own session assessment and profile directory. No approval needed. One named exception to the side-effect-free read definition applies, decided with the operator: opening a thread page marks it "Seen" for the other participant (and may surface presence), which is intrinsic to the only available access path — there is no side-effect-free way to read a Messenger thread in a browser session. `messenger_threads_list` reads the inbox page without opening threads and has no receipt side effect. Miso must treat thread reads as visible to the counterpart. The provider-surface research behind them — including what is verified versus assumed and the live-site validation plan — is in [`conversation-surface-research.md`](conversation-surface-research.md). Interactive reauth for the messenger scope is deferred to step 3.
 3. **#43 step 2 — drafts:** a `prepare` tool that renders a message draft and its `subject_digest`. Autonomous. Output explicitly marked as not-sent and not-authorized.
 4. **#43 step 3 — send:** a `send` tool wired to a real approval flow: OpenClaw presents a grant scoped to (provider, account, `messenger`, send action) whose `subject_digest` is the digest of the previously drafted payload; Musebridge verifies, consumes, sends once with an idempotency token, and reconciles on timeout. Host-path research (real Messenger surface, API vs browser) happens in #43; this boundary applies regardless of access method.
 5. **Later:** `high_consequence` stays refused until a deliberate, separately reviewed change to this gate.

@@ -1,7 +1,7 @@
 import { facebookMarketsFilePath, loadFacebookMarkets } from './market-config.js';
 import { createMarketplaceService, installShutdownHandlers, listen } from './service.js';
 
-export { FixtureBackend, ProviderError, type MarketplaceBackend } from './backend.js';
+export { FixtureBackend, ProviderError, type ConversationBackend, type MarketplaceBackend } from './backend.js';
 export { FacebookMarketplaceBackend, type FacebookMarketplaceBackendOptions } from './facebook-marketplace-backend.js';
 export {
   BROWSER_SESSION_STATUSES,
@@ -16,6 +16,7 @@ export {
 export {
   FACEBOOK_ORIGIN,
   FACEBOOK_MARKETPLACE_PATH,
+  FACEBOOK_MESSENGER_PATH,
   FACEBOOK_PROBE_OUTCOMES,
   FacebookSessionProbe,
   classifyFacebookSession,
@@ -26,7 +27,7 @@ export {
   type FacebookSessionProbeOptions,
   type FacebookPageSnapshot
 } from './facebook.js';
-export { FIXTURE_LISTINGS } from './fixtures.js';
+export { FIXTURE_CONVERSATIONS, FIXTURE_LISTINGS } from './fixtures.js';
 export {
   DEFAULT_FACEBOOK_MARKETS,
   MARKETPLACE_ITEM_PATH,
@@ -63,7 +64,7 @@ export {
   type MarketplaceSearchOutcome,
   type ParseMarketplaceInput
 } from './facebook-marketplace-parse.js';
-export { createMarketplaceService, installShutdownHandlers, listen, parseBackendKind, type MarketplaceService, type ServiceOptions } from './service.js';
+export { createMarketplaceService, installShutdownHandlers, listen, parseBackendKind, parseMessengerEnabled, type MarketplaceService, type ServiceOptions } from './service.js';
 export {
   ReauthManager,
   ProcessReauthRuntime,
