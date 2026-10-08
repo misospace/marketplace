@@ -29,7 +29,8 @@ const CONSENT_BUTTON_PATTERN = /allow all cookies|allow cookies|accept all/i;
 
 /**
  * Typed at a human cadence rather than filled in one shot. The reference implementation does the
- * same, and an instantaneous fill is a plausible cause of an anti-bot challenge.
+ * same, and an instantaneous fill is a plausible cause of an anti-bot challenge. This is the
+ * production default; tests override it through the constructor rather than by editing it.
  */
 const TYPING_DELAY_MS = 250;
 
@@ -53,6 +54,14 @@ export interface FacebookCredentialLoginOptions {
   waitMs?: number;
   pollIntervalMs?: number;
   navigationTimeoutMs?: number;
+  /**
+   * Test-only timing overrides. Production callers never set these: the defaults preserve the
+   * human-cadence typing and the best-effort consent window exactly as deployed. They exist so the
+   * browser tests can exercise the same control flow without paying production-scale wall time.
+   */
+  typingDelayMs?: number;
+  consentTimeoutMs?: number;
+  consentSettleMs?: number;
   logger?: Pick<Console, 'error'>;
 }
 
@@ -99,6 +108,9 @@ export class FacebookCredentialLogin {
   private readonly waitMs: number;
   private readonly pollIntervalMs: number;
   private readonly navigationTimeoutMs: number;
+  private readonly typingDelayMs: number;
+  private readonly consentTimeoutMs: number;
+  private readonly consentSettleMs: number;
   private readonly logger: Pick<Console, 'error'>;
 
   constructor(options: FacebookCredentialLoginOptions) {
@@ -130,11 +142,17 @@ export class FacebookCredentialLogin {
     this.waitMs = options.waitMs ?? FACEBOOK_LOGIN_WAIT_DEFAULT_MS;
     this.pollIntervalMs = options.pollIntervalMs ?? FACEBOOK_LOGIN_POLL_DEFAULT_MS;
     this.navigationTimeoutMs = options.navigationTimeoutMs ?? 15_000;
+    this.typingDelayMs = options.typingDelayMs ?? TYPING_DELAY_MS;
+    this.consentTimeoutMs = options.consentTimeoutMs ?? CONSENT_TIMEOUT_MS;
+    this.consentSettleMs = options.consentSettleMs ?? CONSENT_SETTLE_MS;
     this.logger = options.logger ?? console;
 
     validateTimeout(this.waitMs, 'waitMs');
     validateTimeout(this.pollIntervalMs, 'pollIntervalMs');
     validateTimeout(this.navigationTimeoutMs, 'navigationTimeoutMs');
+    validateTimeout(this.typingDelayMs, 'typingDelayMs');
+    validateTimeout(this.consentTimeoutMs, 'consentTimeoutMs');
+    validateTimeout(this.consentSettleMs, 'consentSettleMs');
   }
 
   private get credentials(): FacebookCredentials {
@@ -157,7 +175,7 @@ export class FacebookCredentialLogin {
       signal
     });
 
-    await dismissConsentBanner(page, signal);
+    await dismissConsentBanner(page, signal, this.consentTimeoutMs, this.consentSettleMs);
     await this.submitCredentials(page, signal);
     return this.waitForUsableSession(page, signal);
   }
@@ -168,12 +186,12 @@ export class FacebookCredentialLogin {
       const email = page.locator(EMAIL_SELECTOR);
       await email.waitFor({ state: 'visible', timeout: this.navigationTimeoutMs });
       if (signal.aborted) throw signal.reason ?? new Error('Browser operation aborted');
-      await email.pressSequentially(username, { delay: TYPING_DELAY_MS });
+      await email.pressSequentially(username, { delay: this.typingDelayMs });
 
       const passwordField = page.locator(PASSWORD_SELECTOR);
       await passwordField.waitFor({ state: 'visible', timeout: this.navigationTimeoutMs });
       if (signal.aborted) throw signal.reason ?? new Error('Browser operation aborted');
-      await passwordField.pressSequentially(password, { delay: TYPING_DELAY_MS });
+      await passwordField.pressSequentially(password, { delay: this.typingDelayMs });
 
       if (signal.aborted) throw signal.reason ?? new Error('Browser operation aborted');
       // Facebook removed the login button, so the form is submitted by pressing Enter.
@@ -267,11 +285,16 @@ export class FacebookCredentialLogin {
  * Best-effort consent dismissal, mirroring the reference implementation. Every failure mode is
  * swallowed: a missing or differently-labelled banner must not fail the login.
  */
-async function dismissConsentBanner(page: Page, signal: AbortSignal): Promise<void> {
+async function dismissConsentBanner(
+  page: Page,
+  signal: AbortSignal,
+  timeoutMs: number,
+  settleMs: number
+): Promise<void> {
   try {
     const button = page.getByRole('button', { name: CONSENT_BUTTON_PATTERN }).first();
-    await button.click({ timeout: CONSENT_TIMEOUT_MS });
-    await sleepUntilAbort(CONSENT_SETTLE_MS, signal);
+    await button.click({ timeout: timeoutMs });
+    await sleepUntilAbort(settleMs, signal);
   } catch {
     // No banner, no permission to click it, or the click raced a navigation: none of it matters.
   }

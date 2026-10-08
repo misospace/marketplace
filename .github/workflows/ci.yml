@@ -4,6 +4,7 @@ on:
   pull_request:
   push:
     branches: [main]
+    tags: ["v*.*.*"]
 
 permissions:
   contents: read
@@ -38,7 +39,11 @@ jobs:
       - name: Install dependencies
         run: npm ci --ignore-scripts
       - name: Install Chromium
-        run: npx playwright install --with-deps chromium
+        # No --with-deps: GitHub-hosted ubuntu runners already ship the shared libraries Chromium
+        # needs, and the dependency pass costs ~5 minutes downloading font packages from a slow
+        # mirror. These tests assert on ARIA roles and DOM structure, never rendered output, so
+        # font coverage is not load-bearing. A missing library fails the Chromium launch loudly.
+        run: npx playwright install chromium
       - name: Typecheck
         run: npm run typecheck
       - name: Lint
@@ -80,3 +85,44 @@ jobs:
           output=$(docker run --rm --network none -v "$PWD/services/marketplace/scripts:/smoke:ro" --entrypoint node marketplace:ci /smoke/reauth-smoke.mjs)
           printf '%s\n' "$output"
           grep -Fq 'SMOKE_RESULT {"orphans":[],"tempDirectories":[]}' <<<"$output"
+
+  # Publishing lives here so the validation checks are not run twice on every push to main; the
+  # publish job reuses the `checks` job above instead of duplicating them in a second workflow.
+  publish:
+    name: Publish to GHCR
+    needs: [actionlint, checks, docker]
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Generate image metadata
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
+        with:
+          images: ghcr.io/misospace/marketplace-mcp
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=sha,prefix=sha-
+      - name: Build and publish image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: .
+          file: services/marketplace/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: true
+          sbom: true
