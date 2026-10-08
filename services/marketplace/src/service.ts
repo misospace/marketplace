@@ -114,6 +114,12 @@ export function createMarketplaceService(options: ServiceOptions = {}): Marketpl
       logger
     }))
     : undefined;
+  if (messengerBrowser !== undefined && messengerBrowser.profileDir === browser.profileDir) {
+    // Session isolation is the point of the second scope: two scopes sharing one profile would
+    // share cookies and one session assessment, so the conflict fails startup rather than the
+    // first conversation call.
+    throw new Error('The messenger scope must not share the marketplace browser profile directory; set MESSENGER_PROFILE_DIR (or messengerProfileDir) to a distinct path.');
+  }
   const messengerProbe = messengerBrowser === undefined
     ? undefined
     : (options.messengerProbe ?? new FacebookSessionProbe({

@@ -426,6 +426,29 @@ describe('fixture MCP service', () => {
     }
   });
 
+  it('rejects a messenger profile directory that resolves to the marketplace profile', () => {
+    const profileRoot = mkdtempSync(join(tmpdir(), 'marketplace-messenger-profile-'));
+    try {
+      const shared = join(profileRoot, 'shared');
+      // Two scopes on one profile would share cookies and one session assessment, so the
+      // conflict must fail startup — including when the same directory is spelled differently.
+      expect(() => createMarketplaceService({
+        backendKind: 'facebook',
+        messengerEnabled: true,
+        browserProfileDir: shared,
+        messengerProfileDir: shared
+      })).toThrow('The messenger scope must not share the marketplace browser profile directory');
+      expect(() => createMarketplaceService({
+        backendKind: 'facebook',
+        messengerEnabled: true,
+        browserProfileDir: shared,
+        messengerProfileDir: `${shared}/.`
+      })).toThrow('The messenger scope must not share the marketplace browser profile directory');
+    } finally {
+      rmSync(profileRoot, { recursive: true, force: true });
+    }
+  });
+
   it('selects the fixture backend by default and supports explicit Facebook selection', async () => {
     expect(structured(await (await connectClient()).callTool({ name: 'marketplace_status', arguments: {} })).backend).toBe('fixture');
     await Promise.allSettled(clients.splice(0).map((client) => client.close()));
