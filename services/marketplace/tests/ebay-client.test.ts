@@ -46,6 +46,12 @@ describe('EbayClient', () => {
     await expect(client.getItem('123')).rejects.toMatchObject({ status: 429, retryAfter: 7 });
   });
 
+  it('treats a missing retry-after as no hint, not zero', async () => {
+    const client = new EbayClient({ ...options, fetchImpl: async (input) => String(input).includes('/oauth2/token')
+      ? ok({ access_token: 'synthetic', expires_in: 3600 }) : new Response('', { status: 429 }) });
+    await expect(client.getItem('123')).rejects.toMatchObject({ status: 429, retryAfter: undefined });
+  });
+
   it('validates constructor credentials and base URL', () => {
     expect(() => new EbayClient({ ...options, clientId: '  ' })).toThrow(TypeError);
     expect(() => new EbayClient({ ...options, clientSecret: '' })).toThrow(TypeError);

@@ -119,7 +119,8 @@ Alternatives considered: a separate `services/shopping` package (rejected for no
 
 - **No Amazon.** Blocked by affiliate-sales prerequisites; revisit only if the operator decides the Keepa/API budget is worth it.
 - **No price history endpoint** in the first slice — sold-item benchmarking via Marketplace Insights is scoped as a follow-up tool (`shopping_sold_stats` or similar) rather than part of search/fetch.
-- **Single marketplace locale** at first (the operator's home marketplace); multi-locale is a parameter later, not a design change.
+- **Single marketplace locale, hardcoded `EBAY-US`.** The client pins the marketplace id header and the search price-filter currency; multi-locale is a parameter later, not a design change (the code carries a comment marking where to thread it).
+- **eBay mapping covers a subset of the `state` vocabulary.** Live eBay responses only ever produce `state: 'active'` or `'unknown'` (an ended item is unknown, never `sold` — these endpoints cannot prove a sale); `sold`/`pending` appear only in the synthetic fixtures. Documented so consumers do not read the enum as a promise.
 - **No comparison logic in Musebridge.** Cross-site ranking/deal scoring is Miso's job; Musebridge returns facts per source.
 
 ## Validation plan

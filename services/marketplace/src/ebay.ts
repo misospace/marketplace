@@ -53,6 +53,9 @@ export class EbayClient {
     const params = new URLSearchParams({ q: query, limit: String(options.limit) });
     if (options.minPrice !== undefined || options.maxPrice !== undefined) {
       // Browse accepts price constraints as one filter expression; currency is pinned to EBAY-US/USD.
+      // The marketplace id below is likewise pinned: single-locale is a documented v1 gap
+      // (docs/shopping-provider-research.md). Thread a marketplace option through here before
+      // adding any other locale, including the currency fallback in ebay-backend mapOffer.
       params.set('filter', `price:[${options.minPrice ?? ''}..${options.maxPrice ?? ''}],priceCurrency:USD`);
     }
     return this.apiRequest(`/buy/browse/v1/item_summary/search?${params}`, signal);
@@ -106,6 +109,8 @@ export class EbayClient {
 }
 
 async function responseError(response: Response): Promise<EbayHttpError> {
-  const value = Number(response.headers.get('retry-after'));
+  // A missing header means "no hint" — Number(null) is 0, which would read as "retry now".
+  const header = response.headers.get('retry-after');
+  const value = header === null ? NaN : Number(header);
   return new EbayHttpError(response.status, Number.isFinite(value) && value >= 0 ? value : undefined);
 }

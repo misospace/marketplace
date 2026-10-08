@@ -17,7 +17,9 @@ beforeAll(async () => {
     if (mode === 'hang') return;
     if (pathname.endsWith('/search')) {
       res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify(mode === 'unmappable' ? { itemSummaries: [{ itemId: 'invalid', title: 'No URL' }, { itemId: 'v1|123|1', itemWebUrl: 'https://www.ebay.com/itm/123', title: 'Synthetic Good Row' }] } : fixture('search-success.json')));
+      res.end(JSON.stringify(mode === 'unmappable'
+        ? { itemSummaries: [{ itemId: 'invalid', title: 'No URL' }, { itemId: 'v1|123|1', itemWebUrl: 'https://www.ebay.com/itm/123', title: 'Synthetic Good Row' }] }
+        : mode === 'coercion' ? coercionTrapPayload() : fixture('search-success.json')));
       return;
     }
     if (mode === 'missing-url') { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ itemId: '123', title: 'Synthetic Missing URL' })); return; }
@@ -34,12 +36,24 @@ function backend() { return new EbayShoppingBackend({ clientId: 'synthetic', cli
 const signal = () => new AbortController().signal;
 const searchInput = shoppingSearchInputSchema.parse({ query: 'synthetic', limit: 10 });
 
+function coercionTrapPayload() {
+  return { itemSummaries: [
+    // Null price value must stay null (Number(null) is 0); renewed is refurbished; the
+    // FREE shipping marker is shippingCostType on the option, not a field on the cost.
+    { itemId: 'v1|2001|0', itemWebUrl: 'https://www.ebay.com/itm/2001', title: 'Synthetic Null Price', price: { value: null, currency: 'USD' }, condition: 'Renewed', shippingOptions: [{ shippingCostType: 'FREE', shippingCost: { value: '0.00', currency: 'USD' } }] },
+    // A numeric price with no currency marker is unattributable and must be dropped.
+    { itemId: 'v1|2002|0', itemWebUrl: 'https://www.ebay.com/itm/2002', title: 'Synthetic No Currency', price: { value: '12.50' } },
+    // An unspecified shipping value is not free (Number('') is 0).
+    { itemId: 'v1|2003|0', itemWebUrl: 'https://www.ebay.com/itm/2003', title: 'Synthetic Empty Shipping', price: { value: '5.00', currency: 'USD' }, shippingOptions: [{ shippingCostType: 'FIXED', shippingCost: { value: '', currency: 'USD' } }] }
+  ] };
+}
+
 describe('EbayShoppingBackend', () => {
   it('maps search offers into valid ProductOffer records', async () => {
     mode = 'normal';
     const offers = await backend().search(searchInput, signal());
     expect(offers).toHaveLength(2);
-    expect(productOfferSchema.parse(offers[0])).toMatchObject({ id: '123456789012', availability: 'unknown', condition: 'new', shipping_cost: 3.25, location: 'Sampleton, US', state: 'active' });
+    expect(productOfferSchema.parse(offers[0])).toMatchObject({ id: '123456789012', availability: 'unknown', condition: 'new', shipping_cost: 3.25, shipping_currency: 'USD', location: 'Sampleton, US', state: 'active' });
   });
   it('fetches item details by legacy id', async () => {
     mode = 'normal';
@@ -52,6 +66,15 @@ describe('EbayShoppingBackend', () => {
     expect(await backend().search(searchInput, signal())).toHaveLength(1);
     mode = 'missing-url';
     await expect(backend().fetch(shoppingFetchInputSchema.parse({ id: '123' }), signal())).rejects.toMatchObject({ code: 'UPSTREAM_ERROR' });
+  });
+  it('refuses coercion traps and keeps attribution only where eBay states it', async () => {
+    mode = 'coercion';
+    const offers = await backend().search(searchInput, signal());
+    expect(offers).toHaveLength(2);
+    expect(productOfferSchema.parse(offers[0])).toMatchObject({
+      id: '2001', price: null, currency: 'USD', condition: 'refurbished', shipping_cost: 0, shipping_currency: 'USD'
+    });
+    expect(offers[1]).toMatchObject({ id: '2003', shipping_cost: null, shipping_currency: null });
   });
   it('maps a 404 to the house no-result case so the tool layer reports NOT_FOUND', async () => {
     mode = 'not-found';
