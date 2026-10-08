@@ -442,12 +442,12 @@ export async function listen(service: MarketplaceService): Promise<void> {
 
 export function installShutdownHandlers(service: MarketplaceService): void {
   const shutdown = async (signal: 'SIGINT' | 'SIGTERM'): Promise<void> => {
-    console.log(`Received ${signal}; shutting down Marketplace fixture MCP.`);
+    console.log(`Received ${signal}; shutting down Marketplace MCP.`);
     try {
       await service.close();
       process.exitCode = 0;
     } catch (error) {
-      console.error('Marketplace fixture MCP shutdown failed:', error);
+      console.error('Marketplace MCP shutdown failed:', error);
       process.exitCode = 1;
     }
   };
