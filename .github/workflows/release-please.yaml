@@ -3,8 +3,9 @@
 # release-please-action v5 has no auto-merge input, and none is set here.
 #
 # The app token matters. Events raised by the default GITHUB_TOKEN do not
-# trigger other workflows, so a tag pushed that way would never fire
-# publish-image.yml (keyed off `v*.*.*` tags). A GitHub App token does.
+# trigger other workflows, so a tag pushed that way would never fire the
+# `v*.*.*` tag trigger in ci.yml (which publishes the image). A GitHub App
+# token does.
 #
 # MISO_* is deliberately a different app from the BOT_* one ai-pr-review.yaml
 # uses: GitHub will not let a PR's author approve its own PR, so a release PR
