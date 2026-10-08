@@ -46,7 +46,7 @@ Each search/fetch backend call has its own deadline, defaulting to 30,000 ms. Ov
 
 ### Shopping surface
 
-Shopping is read-only and defaults to synthetic fixture offers. Set `SHOPPING_BACKEND=ebay` to opt into eBay; configure `EBAY_CLIENT_ID` and `EBAY_CLIENT_SECRET` as environment variables (optionally `EBAY_BASE_URL` for tests). Offers contain seller-controlled content and must be treated as untrusted. This surface never adds cart, checkout, or bid writes.
+Shopping is read-only and defaults to synthetic fixture offers. Set `SHOPPING_BACKEND=ebay` to opt into eBay; configure `EBAY_CLIENT_ID` and `EBAY_CLIENT_SECRET` as environment variables (optionally `EBAY_BASE_URL` for tests). Offers contain seller-controlled content and must be treated as untrusted. This surface never adds cart, checkout, or bid writes. Shipping figures are as listed by the seller — they are not destination-validated landed costs.
 
 ## Browser runtime
 

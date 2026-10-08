@@ -16,8 +16,13 @@ export class EbayShoppingBackend implements ShoppingBackend {
   async search(input: Parameters<ShoppingBackend['search']>[0], signal: AbortSignal): Promise<ProductOffer[]> {
     return this.withDeadline(signal, async (requestSignal) => {
       try {
-        const payload = await this.client.searchItems(input.query, { limit: input.limit, minPrice: input.min_price, maxPrice: input.max_price }, requestSignal) as { itemSummaries?: unknown };
-        if (!Array.isArray(payload?.itemSummaries)) return [];
+        const payload = await this.client.searchItems(input.query, { limit: input.limit, minPrice: input.min_price, maxPrice: input.max_price }, requestSignal) as { itemSummaries?: unknown; total?: unknown };
+        if (!Array.isArray(payload?.itemSummaries)) {
+          // eBay omits itemSummaries on legitimate zero-result responses (total: 0). An absent
+          // array with no zero total is schema drift — a typed error, never a silent empty page.
+          if (payload?.total === 0) return [];
+          throw new ProviderError('UPSTREAM_ERROR', 'The eBay search response was not recognized.');
+        }
         const offers: ProductOffer[] = [];
         for (const item of payload.itemSummaries) {
           const offer = mapOffer(item, false);
@@ -32,9 +37,15 @@ export class EbayShoppingBackend implements ShoppingBackend {
   async fetch(input: Parameters<ShoppingBackend['fetch']>[0], signal: AbortSignal): Promise<ProductOffer | null> {
     return this.withDeadline(signal, async (requestSignal) => {
       try {
+        // A RESTful id addresses the exact variation via GET /item/{id}; a legacy numeric id
+        // or an /itm/ URL can only address the parent listing — variation ambiguity is honest
+        // and documented there (docs/shopping-provider-research.md).
+        const restful = input.id !== undefined && /^v1\|[^|]+\|[^|]+$/.test(input.id);
         const id = input.id ?? legacyIdFromUrl(input.url!);
         if (!id) throw new ProviderError('UPSTREAM_ERROR', 'The eBay item URL does not contain a legacy item id.');
-        const item = await this.client.getItem(id, requestSignal);
+        const item = restful
+          ? await this.client.getItemByRestfulId(id, requestSignal)
+          : await this.client.getItemByLegacyId(id, requestSignal);
         const offer = mapOffer(item, true);
         if (!offer) throw new ProviderError('UPSTREAM_ERROR', 'The eBay item could not be mapped to a product offer.');
         return offer;
@@ -81,7 +92,10 @@ function mapOffer(value: unknown, detail: boolean): ProductOffer | null {
   if (!value || typeof value !== 'object') return null;
   const item = value as Record<string, any>;
   const rawId = typeof item.itemId === 'string' ? item.itemId : '';
-  const id = rawId.match(/^v1\|([^|]+)\|[^|]+$/)?.[1] ?? rawId;
+  // The RESTful item ID (v1|legacy|variation) is the canonical identity: stripping the
+  // variation suffix would collapse distinct variants of one listing into one id and make
+  // search→fetch round-trips resolve to a different variant or none. It is preserved whole.
+  const id = rawId;
   const url = item.itemWebUrl;
   const title = item.title;
   if (!id || typeof url !== 'string' || typeof title !== 'string') return null;
@@ -91,7 +105,7 @@ function mapOffer(value: unknown, detail: boolean): ProductOffer | null {
   const price = priceValue === undefined || priceValue === null || priceValue === '' ? null : Number(priceValue);
   const priceCurrency = item.price?.currency;
   // A numeric price without a currency marker cannot be attributed — drop the row rather
-  // than default the currency (the marketplace id is pinned to EBAY-US today; a numeric
+  // than default the currency (the marketplace id is pinned to EBAY_US today; a numeric
   // price with no currency would be unattributable in any marketplace).
   if (price !== null && typeof priceCurrency !== 'string') return null;
   const option = Array.isArray(item.shippingOptions) ? item.shippingOptions[0] : undefined;

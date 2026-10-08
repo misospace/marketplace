@@ -52,16 +52,22 @@ export class EbayClient {
   async searchItems(query: string, options: EbaySearchOptions, signal?: AbortSignal): Promise<unknown> {
     const params = new URLSearchParams({ q: query, limit: String(options.limit) });
     if (options.minPrice !== undefined || options.maxPrice !== undefined) {
-      // Browse accepts price constraints as one filter expression; currency is pinned to EBAY-US/USD.
-      // The marketplace id below is likewise pinned: single-locale is a documented v1 gap
-      // (docs/shopping-provider-research.md). Thread a marketplace option through here before
-      // adding any other locale, including the currency fallback in ebay-backend mapOffer.
+      // Browse accepts price constraints as one filter expression; currency is pinned to USD.
+      // The marketplace id header is likewise pinned (EBAY_US): single-locale is a documented
+      // v1 gap (docs/shopping-provider-research.md). Thread a marketplace option through here
+      // before adding any other locale, including the currency fallback in mapOffer.
       params.set('filter', `price:[${options.minPrice ?? ''}..${options.maxPrice ?? ''}],priceCurrency:USD`);
     }
     return this.apiRequest(`/buy/browse/v1/item_summary/search?${params}`, signal);
   }
 
-  async getItem(id: string, signal?: AbortSignal): Promise<unknown> {
+  async getItemByRestfulId(id: string, signal?: AbortSignal): Promise<unknown> {
+    // Browse requires the RESTful item ID (v1|legacy|variation) passed through unchanged,
+    // URL-encoded; it selects the exact variation. Legacy lookups cannot address variations.
+    return this.apiRequest(`/buy/browse/v1/item/${encodeURIComponent(id)}`, signal);
+  }
+
+  async getItemByLegacyId(id: string, signal?: AbortSignal): Promise<unknown> {
     const params = new URLSearchParams({ legacy_item_id: id });
     return this.apiRequest(`/buy/browse/v1/item/get_item_by_legacy_id?${params}`, signal);
   }
@@ -70,7 +76,7 @@ export class EbayClient {
     let token = await this.getToken(signal);
     for (let attempt = 0; attempt < 2; attempt++) {
       const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
-        headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'X-EBAY-C-MARKETPLACE-ID': 'EBAY-US' }, signal
+        headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'X-EBAY-C-MARKETPLACE-ID': 'EBAY_US' }, signal
       });
       if (response.status === 401 && attempt === 0) {
         token = await this.getToken(signal, true);

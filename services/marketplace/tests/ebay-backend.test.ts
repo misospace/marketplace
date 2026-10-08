@@ -9,20 +9,28 @@ const fixture = (name: string) => JSON.parse(readFileSync(new URL(`./fixtures/eb
 let server: Server;
 let origin = '';
 let mode = 'normal';
+let lastPath = '';
+let lastMarketplaceId = '';
 
 beforeAll(async () => {
   server = createServer((req, res) => {
     const pathname = new URL(req.url ?? '/', 'http://127.0.0.1').pathname;
+    lastPath = pathname;
+    lastMarketplaceId = req.headers['x-ebay-c-marketplace-id'] ?? '';
     if (pathname.endsWith('/oauth2/token')) { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(fixture('token.json'))); return; }
     if (mode === 'hang') return;
     if (pathname.endsWith('/search')) {
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify(mode === 'unmappable'
         ? { itemSummaries: [{ itemId: 'invalid', title: 'No URL' }, { itemId: 'v1|123|1', itemWebUrl: 'https://www.ebay.com/itm/123', title: 'Synthetic Good Row' }] }
-        : mode === 'coercion' ? coercionTrapPayload() : fixture('search-success.json')));
+        : mode === 'coercion' ? coercionTrapPayload()
+        : mode === 'variations' ? variationsPayload()
+        : mode === 'malformed' ? { total: 3, warnings: [] }
+        : fixture('search-success.json')));
       return;
     }
     if (mode === 'missing-url') { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ itemId: '123', title: 'Synthetic Missing URL' })); return; }
+    if (mode === 'variations') { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ ...fixture('item-success.json'), itemId: 'v1|555000|2', title: 'Synthetic Widget Variation Two' })); return; }
     if (mode === 'not-found') { res.writeHead(404, { 'content-type': 'application/json' }); res.end(JSON.stringify(fixture('item-404.json'))); return; }
     res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(fixture('item-success.json')));
   });
@@ -35,6 +43,13 @@ afterAll(async () => { server.closeAllConnections(); await new Promise<void>((re
 function backend() { return new EbayShoppingBackend({ clientId: 'synthetic', clientSecret: 'synthetic', baseUrl: origin }); }
 const signal = () => new AbortController().signal;
 const searchInput = shoppingSearchInputSchema.parse({ query: 'synthetic', limit: 10 });
+
+function variationsPayload() {
+  return { itemSummaries: [
+    { itemId: 'v1|555000|1', itemWebUrl: 'https://www.ebay.com/itm/555000', title: 'Synthetic Widget Variation One', price: { value: '10.00', currency: 'USD' }, condition: 'New' },
+    { itemId: 'v1|555000|2', itemWebUrl: 'https://www.ebay.com/itm/555000', title: 'Synthetic Widget Variation Two', price: { value: '12.00', currency: 'USD' }, condition: 'New' }
+  ] };
+}
 
 function coercionTrapPayload() {
   return { itemSummaries: [
@@ -53,13 +68,26 @@ describe('EbayShoppingBackend', () => {
     mode = 'normal';
     const offers = await backend().search(searchInput, signal());
     expect(offers).toHaveLength(2);
-    expect(productOfferSchema.parse(offers[0])).toMatchObject({ id: '123456789012', availability: 'unknown', condition: 'new', shipping_cost: 3.25, shipping_currency: 'USD', location: 'Sampleton, US', state: 'active' });
+    expect(productOfferSchema.parse(offers[0])).toMatchObject({ id: 'v1|123456789012|0', availability: 'unknown', condition: 'new', shipping_cost: 3.25, shipping_currency: 'USD', location: 'Sampleton, US', state: 'active' });
   });
   it('fetches item details by legacy id', async () => {
     mode = 'normal';
     const offer = await backend().fetch(shoppingFetchInputSchema.parse({ id: '123456789012' }), signal());
-    expect(offer).toMatchObject({ id: '123456789012', availability: 'in_stock' });
+    expect(offer).toMatchObject({ id: 'v1|123456789012|0', availability: 'in_stock' });
     productOfferSchema.parse(offer);
+  });
+  it('preserves variation identity: two variants of one listing stay distinct, and a RESTful id fetches the exact variant', async () => {
+    mode = 'variations';
+    const offers = await backend().search(searchInput, signal());
+    expect(offers.map((offer) => offer.id)).toEqual(['v1|555000|1', 'v1|555000|2']);
+    const offer = await backend().fetch(shoppingFetchInputSchema.parse({ id: 'v1|555000|2' }), signal());
+    expect(offer).toMatchObject({ id: 'v1|555000|2', title: 'Synthetic Widget Variation Two' });
+    expect(lastPath).toBe(`/buy/browse/v1/item/${encodeURIComponent('v1|555000|2')}`);
+  });
+  it('sends the marketplace header in eBay\'s underscore form', async () => {
+    mode = 'normal';
+    await backend().search(searchInput, signal());
+    expect(lastMarketplaceId).toBe('EBAY_US');
   });
   it('skips unmappable search rows and fails closed on a fetch without URL', async () => {
     mode = 'unmappable';
@@ -67,14 +95,19 @@ describe('EbayShoppingBackend', () => {
     mode = 'missing-url';
     await expect(backend().fetch(shoppingFetchInputSchema.parse({ id: '123' }), signal())).rejects.toMatchObject({ code: 'UPSTREAM_ERROR' });
   });
-  it('refuses coercion traps and keeps attribution only where eBay states it', async () => {
-    mode = 'coercion';
+  it('refuses coercion traps and keeps attribution only where eBay states it', async () => {    mode = 'coercion';
     const offers = await backend().search(searchInput, signal());
     expect(offers).toHaveLength(2);
     expect(productOfferSchema.parse(offers[0])).toMatchObject({
-      id: '2001', price: null, currency: 'USD', condition: 'refurbished', shipping_cost: 0, shipping_currency: 'USD'
+      id: 'v1|2001|0', price: null, currency: 'USD', condition: 'refurbished', shipping_cost: 0, shipping_currency: 'USD'
     });
-    expect(offers[1]).toMatchObject({ id: '2003', shipping_cost: null, shipping_currency: null });
+    expect(offers[1]).toMatchObject({ id: 'v1|2003|0', shipping_cost: null, shipping_currency: null });
+  });
+  it('rejects a search response with no itemSummaries and no zero total as schema drift', async () => {
+    mode = 'malformed';
+    await expect(backend().search(searchInput, signal())).rejects.toMatchObject({
+      code: 'UPSTREAM_ERROR', message: 'The eBay search response was not recognized.'
+    });
   });
   it('maps a 404 to the house no-result case so the tool layer reports NOT_FOUND', async () => {
     mode = 'not-found';

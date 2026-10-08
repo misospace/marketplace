@@ -18,8 +18,8 @@ Researched against official developer documentation and program pages as of Octo
 
 | Source | Sanctioned path | Access bar | Search | Item detail | Stock | Price + shipping | Price history | Canonical IDs | Currency | Verdict |
 |---|---|---|---|---|---|---|---|---|---|---|
-| **eBay** | Browse API + Marketplace Insights API (free dev account, self-serve keys) | ★ very low | ✅ | ✅ | ✅ | ✅ | ⚠️ sold-item stats via Insights | ✅ `itemId`/`ePID` | ✅ per-marketplace | **Recommended first source** |
-| **Best Buy** | Developer API (free self-serve key) | ★ very low | ✅ | ✅ | ✅ incl. store-level | ✅ | ❌ | ✅ SKU | ❌ USD only | Good second source; single retailer |
+| **eBay** | Browse API (dev key self-serve; **production access requires an Application Growth Check approval**) | ★★ key instant, production gated | ✅ | ✅ | ✅ | ✅ | ❌ (Marketplace Insights is Limited Release — closed to new users) | ✅ `itemId`/`ePID` | ✅ per-marketplace | **Coverage winner; access must be confirmed at registration** |
+| **Best Buy** | Developer API (free self-serve key, production included) | ★ very low | ✅ | ✅ | ✅ incl. store-level | ✅ | ❌ | ✅ SKU | ❌ USD only | **The reliably accessible fallback** — instant key, single retailer |
 | **Amazon** | Creators API (PA-API v5 retired ~May 2026) | ★★★ — requires 10 qualifying affiliate sales in trailing 30 days before keys | ✅ | ✅ | ✅ | ✅ | ❌ (Keepa, paid) | ✅ ASIN | ✅ per-locale keys | Blocked for a new personal account; revisit later |
 | **Walmart** | Affiliate API | ★★ affiliate approval; product-data API separately gated | ✅ | partial | ❌ | ✅ | ❌ | ✅ | ❌ USD | Affiliate-link-shaped, weak coverage |
 | **AliExpress** | Open Platform affiliate track | ★★ app audit + identity verification (passport for individuals), ~3–5 days | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | Viable later; friction up front |
@@ -34,31 +34,35 @@ Researched against official developer documentation and program pages as of Octo
 
 Prior-art survey (not dependencies): the MCP ecosystem has several shopping servers — eBay official (`@ebay/npm-public-api-mcp`, read-only GET), community `ebay-mcp` (sell-side), `shopping-deals-mcp-server` (multi-source, Python, mixes official APIs with scraping) — useful as references for API shapes and failure modes, none suitable for adoption into this TypeScript monorepo. Craigslist-scraping servers exist and are excluded for the same ToS reason.
 
-## The recommended first source: eBay Browse API
+## The recommended source: eBay Browse API — with an honest access caveat
 
-Why it wins for this use case:
+Why eBay is still the coverage winner for this use case:
 
-- **Sanctioned and self-serve.** Free developer account, production keys issued immediately, OAuth 2.0 client-credentials for read operations. No affiliate relationship, no sales threshold, no business plan review.
-- **Coverage matches the contract** (see below): keyword/category/condition/price-range search, item detail with condition and seller info, availability, price with shipping service options, canonical `itemId` plus `ePID` for catalog-level normalization, and per-marketplace currency/locale handling.
-- **Price benchmarking without a paid subscription.** Marketplace Insights (sold/completed data, summary level) comes with the same free developer account — for used solar gear and batteries, "what did these actually sell for" is the deal-scoring input that matters most.
+- **Best data coverage** for the contract below: keyword/category/condition/price-range search, item detail with condition and seller info, availability, price with shipping service options, canonical RESTful item IDs plus `ePID` for catalog-level normalization, per-marketplace currency/locale handling.
 - **No browser.** A plain HTTPS API with an application token means no browser profile, no session probe, no login, no read-receipt-style side effects, no reauth console. The whole session machinery this service needed for Facebook simply does not apply.
 
-Honest caveats:
+**The caveat (corrected after initial research overstated it):** eBay's developer key is self-serve, but per the official Buying Application guide, production access to the Buy APIs "is intended for certain approved eBay partners" and requires a mandatory **Application Growth Check** before a production keyset can call the restricted Buy APIs — with acceptance based on the proposed business model. A personal read-only shopping agent is not one of the guide's exemplar use cases (affiliate, member checkout, guest checkout, Offer API), so **whether this operator gets production Browse access is an open question that only registration can answer**. The **Marketplace Insights API** (sold-item history) is a Limited Release that is not open to new users — sold-price benchmarking is *not* a benefit this design can assume. An early correction of the same kind: the marketplace id header is `EBAY_US` (underscore), which matters for every real call.
 
-- **Rate limits**: ~5,000 calls/day on the default free tier (grow-your-limits process exists). Fine for watch-and-compare workloads.
+Consequently: this implementation ships fixture-first and the "first usable non-Facebook source" claim in #48 is **conditional on the operator confirming production Browse access at registration**. If it is not granted, the fallback is **Best Buy** — its key is instant and includes production — at the cost of single-retailer coverage and USD-only. Registration at developer.ebay.com is cheap; the growth-check outcome is the deciding fact.
+
+Honest caveats that hold either way:
+
+- **Rate limits**: on the order of thousands of calls/day on default tiers (confirm exact numbers on the developer dashboard; do not trust the research figure).
 - **Quantity/availability divergence**: reported quantities are known to diverge from live state for multi-quantity listings. Treat stock as a fact with a timestamp, not a guarantee.
-- **No per-transaction price history**: Insights gives sold-item statistics, not each transaction. Good enough for benchmarking; not a Keepa-style history.
+- **Shipping figures are not destination-validated.** No `X-EBAY-C-ENDUSERCTX` context is sent, so returned shipping costs reflect the listing's own shipping setup, not a landed-cost quote to the operator's address. Treat `shipping_cost` as an origin-side fact; threading a configured delivery destination is a follow-up, not part of this wave.
 - **ToS**: API use for personal tooling is fine; reselling data or building a competing marketplace is not. Direct scraping of ebay.com remains prohibited — API only.
 
 ## What is verified vs assumed
 
-**Verified against official program/docs pages (Oct 2026):** eBay self-serve key issuance and free tier; Best Buy self-serve key; Amazon's sales-threshold prerequisite and PA-API v5 retirement; Target/HD/Lowe's/Google lacking public discovery APIs; Craigslist ToS prohibition; Keepa pricing tiers.
+**Verified against official program/docs pages (Oct 2026):** eBay self-serve key issuance and free tier; Best Buy self-serve key with production included; Amazon's sales-threshold prerequisite and PA-API v5 retirement; Target/HD/Lowe's/Google lacking public discovery APIs; Craigslist ToS prohibition; Keepa pricing tiers. **Verified from the official Buying Application guide (and initially missed):** production Buy API access requires an Application Growth Check approval keyed to the proposed business model, and Marketplace Insights is a Limited Release closed to new users — access and coverage are separate gates and only the first was verified initially.
 
 **Assumed / to verify during implementation** (marked so they are checked at key-acquisition and first-live-call time, not trusted blindly):
 
+0. **Whether this operator is granted production Browse access at all** — the Application Growth Check outcome is the gating fact for the whole eBay path; check it first at registration.
+
 1. Exact Browse API endpoint paths and response field names — to be confirmed against the official Browse API reference when the client is written; the survey above establishes coverage, not spelling.
 2. Current default rate-limit numbers (the 5,000/day figure is from docs summaries; confirm on the developer dashboard once keys exist).
-3. Marketplace Insights API availability scope for a brand-new application (some Insights features have had eligibility criteria).
+3. ~~Marketplace Insights API availability scope for a brand-new application~~ — resolved: the official Buying Application guide states Marketplace Insights is a Limited Release closed to new users; sold-price benchmarking is not available to this operator and is not part of any plan.
 4. OAuth client-credentials token lifetime and refresh behavior (implement token caching with proactive refresh and a typed error on 401 regardless).
 
 The synthetic-identities-only policy still applies to testing: the eBay backend is built against fixture HTTP responses first; live calls happen only with an operator-issued key in the environment.
@@ -118,13 +122,13 @@ Alternatives considered: a separate `services/shopping` package (rejected for no
 ## Deliberate gaps this wave
 
 - **No Amazon.** Blocked by affiliate-sales prerequisites; revisit only if the operator decides the Keepa/API budget is worth it.
-- **No price history endpoint** in the first slice — sold-item benchmarking via Marketplace Insights is scoped as a follow-up tool (`shopping_sold_stats` or similar) rather than part of search/fetch.
-- **Single marketplace locale, hardcoded `EBAY-US`.** The client pins the marketplace id header and the search price-filter currency; multi-locale is a parameter later, not a design change (the code carries a comment marking where to thread it).
+- **No price history endpoint** in the first slice, and none is planned: Marketplace Insights (sold-item history) is a Limited Release closed to new users, so sold-price benchmarking is not attainable through eBay's sanctioned path for this operator.
+- **Single marketplace locale, hardcoded `EBAY_US`.** The client pins the marketplace id header and the search price-filter currency; multi-locale is a parameter later, not a design change (the code carries a comment marking where to thread it).
 - **eBay mapping covers a subset of the `state` vocabulary.** Live eBay responses only ever produce `state: 'active'` or `'unknown'` (an ended item is unknown, never `sold` — these endpoints cannot prove a sale); `sold`/`pending` appear only in the synthetic fixtures. Documented so consumers do not read the enum as a promise.
 - **No comparison logic in Musebridge.** Cross-site ranking/deal scoring is Miso's job; Musebridge returns facts per source.
 
 ## Validation plan
 
-1. Operator registers at developer.ebay.com and provisions keys (the one manual step this vertical needs; no account credentials are shared with Musebridge — it is an application token, not a login).
+1. Operator registers at developer.ebay.com and provisions keys (the one manual step this vertical needs; no account credentials are shared with Musebridge — it is an application token, not a login). **First finding to record: whether production Browse access is granted directly, requires an Application Growth Check, or is refused** — and, if refused, whether the Best Buy fallback becomes the designated first source.
 2. Implementation proceeds fixture-first: typed client against recorded fixture responses, then one live search + one live fetch with the operator's key to validate assumption items 1–4 above.
 3. Results of the live validation are appended to this doc (verified vs assumed list updated) before the tools are treated as production-reliable — same bar as the Messenger extraction contract.

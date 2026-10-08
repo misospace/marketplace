@@ -118,7 +118,9 @@ export const shoppingSearchInputSchema = z.object({
 }, { message: 'min_price must be less than or equal to max_price', path: ['max_price'] });
 
 export const shoppingFetchInputSchema = z.object({
-  id: z.string().min(1).max(MAX_LISTING_ID_LENGTH).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/).optional(),
+  // A legacy item id, or eBay's RESTful item id (v1|legacy|variation) exactly as Browse
+  // search returns it — the only form that addresses a specific variation.
+  id: z.string().min(1).max(MAX_LISTING_ID_LENGTH).regex(/^(?:v1\|[A-Za-z0-9][A-Za-z0-9._-]{0,60}\|[A-Za-z0-9][A-Za-z0-9._-]{0,60}|[A-Za-z0-9][A-Za-z0-9._-]*)$/).optional(),
   url: httpUrlSchema.optional()
 }).strict().refine((input) => Number(input.id !== undefined) + Number(input.url !== undefined) === 1, {
   message: 'Provide exactly one of id or url'

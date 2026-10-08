@@ -12,7 +12,7 @@ describe('EbayClient', () => {
       return ok({ itemSummaries: [] });
     } });
     await client.searchItems('synthetic', { limit: 2 });
-    await client.getItem('123');
+    await client.getItemByLegacyId('123');
     expect(tokenCalls).toBe(1);
   });
 
@@ -35,7 +35,7 @@ describe('EbayClient', () => {
       apiCalls++;
       return new Response('', { status: 401 });
     } });
-    await expect(client.getItem('123')).rejects.toMatchObject({ name: 'EbayHttpError', status: 401 });
+    await expect(client.getItemByLegacyId('123')).rejects.toMatchObject({ name: 'EbayHttpError', status: 401 });
     expect(tokenCalls).toBe(2);
     expect(apiCalls).toBe(2);
   });
@@ -43,13 +43,13 @@ describe('EbayClient', () => {
   it('preserves numeric retry-after on 429', async () => {
     const client = new EbayClient({ ...options, fetchImpl: async (input) => String(input).includes('/oauth2/token')
       ? ok({ access_token: 'synthetic', expires_in: 3600 }) : new Response('', { status: 429, headers: { 'retry-after': '7' } }) });
-    await expect(client.getItem('123')).rejects.toMatchObject({ status: 429, retryAfter: 7 });
+    await expect(client.getItemByLegacyId('123')).rejects.toMatchObject({ status: 429, retryAfter: 7 });
   });
 
   it('treats a missing retry-after as no hint, not zero', async () => {
     const client = new EbayClient({ ...options, fetchImpl: async (input) => String(input).includes('/oauth2/token')
       ? ok({ access_token: 'synthetic', expires_in: 3600 }) : new Response('', { status: 429 }) });
-    await expect(client.getItem('123')).rejects.toMatchObject({ status: 429, retryAfter: undefined });
+    await expect(client.getItemByLegacyId('123')).rejects.toMatchObject({ status: 429, retryAfter: undefined });
   });
 
   it('validates constructor credentials and base URL', () => {
