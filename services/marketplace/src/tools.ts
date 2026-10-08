@@ -4,6 +4,14 @@ import { z } from 'zod';
 import { ProviderError, type MarketplaceBackend } from './backend.js';
 import type { ProviderSessionAssessment } from './browser.js';
 import {
+  authorizeAction,
+  DenyAllAuthorizer,
+  subjectDigest,
+  type ActionAuthorizer,
+  type ActionDefinition,
+  type ActionRequest
+} from './authorization.js';
+import {
   fetchInputSchema,
   fetchOutputSchema,
   SCHEMA_VERSION,
@@ -13,42 +21,62 @@ import {
   statusInputSchema,
   statusOutputSchema,
   providerErrorSchema,
+  runtimeFailureSchema,
   type RuntimeFailure
 } from './domain.js';
+
+const marketplaceScope = { provider: 'facebook', account: 'default', surface: 'marketplace' } as const;
 
 const TOOLS = [
   {
     name: 'marketplace_search',
     description: 'Search marketplace listings.',
     inputSchema: searchInputSchema,
-    outputSchema: searchOutputSchema
+    outputSchema: searchOutputSchema,
+    definition: { riskClass: 'read', scope: marketplaceScope }
   },
   {
     name: 'marketplace_fetch',
     description: 'Fetch one marketplace listing by ID or canonical URL. Does not fetch remote URLs.',
     inputSchema: fetchInputSchema,
-    outputSchema: fetchOutputSchema
+    outputSchema: fetchOutputSchema,
+    definition: { riskClass: 'read', scope: marketplaceScope }
   },
   {
     name: 'marketplace_status',
     description: 'Report service and schema versions, the configured backend name, and the Facebook session state.',
     inputSchema: statusInputSchema,
-    outputSchema: statusOutputSchema
+    outputSchema: statusOutputSchema,
+    definition: { riskClass: 'read', scope: marketplaceScope }
   }
 ] as const;
 
+export const TOOL_DEFINITIONS: Readonly<Record<ToolName, ActionDefinition>> = Object.fromEntries(
+  TOOLS.map(({ name, definition }) => [name, definition])
+) as Record<ToolName, ActionDefinition>;
+
 type ToolName = typeof TOOLS[number]['name'];
-const inputSchemas: Record<ToolName, z.ZodType> = {
-  marketplace_search: searchInputSchema,
-  marketplace_fetch: fetchInputSchema,
-  marketplace_status: statusInputSchema
-};
+const inputSchemas = Object.fromEntries(TOOLS.map(({ name, inputSchema }) => [name, inputSchema])) as unknown as Record<ToolName, z.ZodType>;
 
 export interface MarketplaceToolOptions {
   backendName?: string;
   backendTimeoutMs?: number;
   shutdownSignal?: AbortSignal;
   sessionAssessment?: () => ProviderSessionAssessment;
+  /** Per-call host seam for approval grants; this service does not issue grants. */
+  approvalGrant?: (toolName: string) => unknown;
+  authorizer?: ActionAuthorizer;
+}
+
+export function assertWritableToolsHaveAuthorizer(
+  tools: ReadonlyArray<{ readonly name: string; readonly definition: ActionDefinition }>,
+  authorizer: ActionAuthorizer | undefined
+): void {
+  for (const { name, definition } of tools) {
+    if ((definition.riskClass === 'send' || definition.riskClass === 'high_consequence') && !authorizer) {
+      throw new Error(`Tool ${name} requires an authorizer for write actions`);
+    }
+  }
 }
 
 export function registerMarketplaceTools(
@@ -57,9 +85,12 @@ export function registerMarketplaceTools(
   logger: Pick<Console, 'error'> = console,
   options: MarketplaceToolOptions = {}
 ): void {
+  assertWritableToolsHaveAuthorizer(TOOLS, options.authorizer);
+
   const backendName = options.backendName ?? backend.name;
   const backendTimeoutMs = options.backendTimeoutMs ?? 30_000;
   const shutdownSignal = options.shutdownSignal;
+  const authorizer = options.authorizer ?? new DenyAllAuthorizer();
   server.registerCapabilities({ tools: {} });
   server.setRequestHandler(ListToolsRequestSchema, () => ({
     tools: TOOLS.map(({ name, description, inputSchema, outputSchema }) => ({
@@ -83,53 +114,76 @@ export function registerMarketplaceTools(
     }
     if (!parsed.success) throw new McpError(ErrorCode.InvalidParams, formatValidationError(parsed.error));
 
+    const definition = TOOL_DEFINITIONS[name];
+    let grant: unknown;
+    if (definition.riskClass === 'send') {
+      try {
+        grant = options.approvalGrant?.(name);
+      } catch {
+        // A host that cannot produce a grant must never authorize a send; fail closed below.
+        grant = undefined;
+      }
+    }
+    const actionRequest: ActionRequest = {
+      ...definition.scope,
+      action: name,
+      subjectDigest: subjectDigest(parsed.data)
+    };
+    const decision = authorizeAction(definition, actionRequest, authorizer, grant);
+
     const outputSchema = name === 'marketplace_search'
       ? searchOutputSchema
       : name === 'marketplace_fetch'
         ? fetchOutputSchema
         : statusOutputSchema;
     let validatedOutput: z.infer<typeof searchOutputSchema | typeof fetchOutputSchema | typeof statusOutputSchema>;
-    try {
-      let output: unknown;
-      if (name === 'marketplace_search') {
-        const listings = await runBackendOperation(
-          (signal) => backend.search(parsed.data as z.infer<typeof searchInputSchema>, signal),
-          backendTimeoutMs,
-          extra.signal,
-          shutdownSignal
-        );
-        output = { ok: true, backend: backendName, listings };
-      } else if (name === 'marketplace_fetch') {
-        const listing = await runBackendOperation(
-          (signal) => backend.fetch(parsed.data as z.infer<typeof fetchInputSchema>, signal),
-          backendTimeoutMs,
-          extra.signal,
-          shutdownSignal
-        );
-        output = listing === null
-          ? runtimeFailure('NOT_FOUND', 'No listing matched the supplied identifier.')
-          : { ok: true, backend: backendName, listing };
-      } else {
-        const sessionAssessment = options.sessionAssessment;
-        output = {
-          ok: true,
-          service_version: SERVICE_VERSION,
-          schema_version: SCHEMA_VERSION,
-          backend: backendName,
-          ...(sessionAssessment ? { facebook_session: { status: sessionAssessment() } } : {})
-        };
-      }
-      validatedOutput = outputSchema.parse(output);
-    } catch (error) {
-      if (extra.signal.aborted || shutdownSignal?.aborted) throw error;
-      const providerFailure = getProviderFailure(error);
-      if (providerFailure && name !== 'marketplace_status') {
-        validatedOutput = { ok: false, error: providerFailure };
-      } else {
-        const requestId = (request as { id?: unknown }).id;
-        const idSuffix = requestId !== undefined ? ` [request id: ${String(requestId)}]` : '';
-        logger.error(`Marketplace service failure (tool: ${name})${idSuffix}:`, error);
-        validatedOutput = runtimeFailure('INTERNAL_ERROR', 'The backend could not complete the request.');
+    if (!decision.ok) {
+      // Refusals parse against the shared runtime failure schema so the uniform refusal shape
+      // does not depend on each tool's success-oriented output schema.
+      validatedOutput = runtimeFailureSchema.parse({ ok: false, error: { code: decision.code, message: decision.message } });
+    } else {
+      try {
+        let output: unknown;
+        if (name === 'marketplace_search') {
+          const listings = await runBackendOperation(
+            (signal) => backend.search(parsed.data as z.infer<typeof searchInputSchema>, signal),
+            backendTimeoutMs,
+            extra.signal,
+            shutdownSignal
+          );
+          output = { ok: true, backend: backendName, listings };
+        } else if (name === 'marketplace_fetch') {
+          const listing = await runBackendOperation(
+            (signal) => backend.fetch(parsed.data as z.infer<typeof fetchInputSchema>, signal),
+            backendTimeoutMs,
+            extra.signal,
+            shutdownSignal
+          );
+          output = listing === null
+            ? runtimeFailure('NOT_FOUND', 'No listing matched the supplied identifier.')
+            : { ok: true, backend: backendName, listing };
+        } else {
+          const sessionAssessment = options.sessionAssessment;
+          output = {
+            ok: true,
+            service_version: SERVICE_VERSION,
+            schema_version: SCHEMA_VERSION,
+            backend: backendName,
+            ...(sessionAssessment ? { facebook_session: { status: sessionAssessment() } } : {})
+          };
+        }
+        validatedOutput = outputSchema.parse(output);
+      } catch (error) {
+        if (extra.signal.aborted || shutdownSignal?.aborted) throw error;
+        const providerFailure = getProviderFailure(error);
+        if (providerFailure && name !== 'marketplace_status') {
+          validatedOutput = { ok: false, error: providerFailure };
+        } else {
+          const requestId = (request as { id?: unknown }).id;
+          const idSuffix = requestId !== undefined ? ` [request id: ${String(requestId)}]` : '';
+          logger.error(`Marketplace service failure (tool: ${name})${idSuffix}:`, error);
+          validatedOutput = runtimeFailure('INTERNAL_ERROR', 'The backend could not complete the request.');
+        }
       }
     }
     const serialized = JSON.stringify(validatedOutput);

@@ -78,6 +78,24 @@ export {
   type ReauthManagerOptions
 } from './reauth.js';
 export { createReauthAdminServer, type ReauthAdminServer } from './admin.js';
+export {
+  ACTION_RISK_CLASSES,
+  approvalGrantSchema,
+  canonicalActionInput,
+  subjectDigest,
+  authorizeAction,
+  DenyAllAuthorizer,
+  InMemoryActionAuthorizer,
+  type ActionRiskClass,
+  type ActionScope,
+  type ActionDefinition,
+  type ApprovalGrant,
+  type ActionRequest,
+  type AuthorizationDecision,
+  type AuthorizationFailureCode,
+  type ActionAuthorizer
+} from './authorization.js';
+export { assertWritableToolsHaveAuthorizer, registerMarketplaceTools, TOOL_DEFINITIONS, type MarketplaceToolOptions } from './tools.js';
 export * from './domain.js';
 
 const isMain = process.argv[1] !== undefined && import.meta.url === new URL(`file://${process.argv[1]}`).href;
