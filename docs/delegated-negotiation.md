@@ -8,8 +8,8 @@ Design/decision record for Phase 3 of Parent #38 ("Assisted offers and bounded d
 
 Phase 1 drafts price and wording for approval. Phase 2 sends approved messages and tracks replies. Phase 3, only with separate explicit delegation, permits a bounded back-and-forth with a price ceiling/floor, expiration, permitted topics, clear stop conditions, and complete audit/visibility. This document does not redesign Phases 1–2; it references their specified contracts:
 
-- **#62 `messenger_prepare` (Phase 1).** A `prepare`-class tool that renders a draft and its `subject_digest` (SHA-256 of the canonical key-sorted JSON of the *validated* input, via `subjectDigest` in `src/authorization.ts`), embeds a UUID idempotency token, and marks output status `draft` / `sent:false`. It is autonomous, and its output is **not** authorization to send.
-- **#63 `messenger_send` (Phase 2).** A `send`-class tool that consumes a single-use grant matching the prepared `subject_digest` plus idempotency token; consumption is single-use; on `TIMEOUT` it reconciles by re-reading the thread and matching the idempotency token (never auto-resend; unconfirmed = status `unknown`); it requires a production authorizer with issuance authentication and interactive/loopback reauth for the messenger scope. Production stays deny-all until #43 ships issuance-authenticated verification.
+- **#62 `messenger_prepare` (Phase 1; #43 step 2).** A `prepare`-class tool that renders a draft and its `subject_digest` (SHA-256 of the canonical key-sorted JSON of the *validated* input, via `subjectDigest` in `src/authorization.ts`), embeds a UUID idempotency token, and marks output status `draft` / `sent:false`. It is autonomous, and its output is **not** authorization to send.
+- **#63 `messenger_send` (Phase 2; #43 step 3).** A `send`-class tool that consumes a single-use grant matching the prepared `subject_digest` plus idempotency token; consumption is single-use; on `TIMEOUT` it reconciles by re-reading the thread and matching the idempotency token (never auto-resend; unconfirmed = status `unknown`); it requires a production authorizer with issuance authentication and interactive/loopback reauth for the messenger scope. Production stays deny-all until #43 ships issuance-authenticated verification.
 
 The gate, risk classes, scope declarations, grant verifier, and the four risk classes `read`, `prepare`, `send`, `high_consequence` were established by #41 and are enforced through `authorizeAction` in `src/authorization.ts`. Throughout this document those class names are used verbatim; no new class, marker, or envelope vocabulary is introduced for the near term.
 
@@ -19,7 +19,7 @@ The gate, risk classes, scope declarations, grant verifier, and the four risk cl
 |---|---|---|
 | Miso / OpenClaw | Negotiation reasoning, mandate (price bounds, topics, locality, expiration), turn-by-turn authorization under a granted human delegation, issuing approval grants | Assume Musebridge will interpret the mandate for it |
 | Musebridge | Scope/digest/expiry verification, single-use consumption, dispatch, reconciliation, unconditional `high_consequence` refusal | Issue, extend, or self-approve grants; interpret negotiation semantics beyond scope matching |
-| Operator (Miso / human) | The original delegation instruction ("ask me before making a firm commitment") and any fresh approval at escalation | — |
+| Operator (the human principal, through Miso) | The original delegation instruction ("ask me before making a firm commitment") and any fresh approval at escalation | — |
 
 Every inbound seller message is untrusted input. Every approval grant is an opaque, single-use capability token. This mirrors the actor table in [provider-action-boundaries.md](provider-action-boundaries.md); the delegation does not widen either actor's authority.
 
@@ -34,7 +34,7 @@ Every inbound seller message is untrusted input. Every approval grant is an opaq
 
 ## The architectural decision: a staged hybrid
 
-The key question: does multi-turn negotiation use N single-use `approvalGrantSchema` entries (Miso re-approves each turn) or a new grant kind with envelope fields? **Decision: a staged hybrid.** The near-term mechanism is N existing single-use grants; a structural delegation record is proposed only for the future, and only as a deliberate amendment to the boundary contract.
+The key question: does multi-turn negotiation use N single-use `approvalGrantSchema` entries (the Miso/OpenClaw agent issues one grant per message; a fresh human prompt is required only at escalation, per Stage 2) or a new grant kind with envelope fields? **Decision: a staged hybrid.** The near-term mechanism is N existing single-use grants; a structural delegation record is proposed only for the future, and only as a deliberate amendment to the boundary contract.
 
 ### Stage 1 — N existing single-use grants (adopted now; the only mechanism until a reviewed gate extension)
 
@@ -46,9 +46,9 @@ The mandate — price floor/ceiling, permitted topics, locality, expiration, sto
 
 ### Stage 3 — structural delegation record (proposed future contract; requires amending the boundary contract)
 
-Only if operators later need independent aggregate controls, add a deliberately-reviewed **structural delegation record** carrying: `delegation_id`; monotonic `revision`; an authenticated issuer; provider/account/surface/action plus explicit conversation/listing scope; `expires_at`; `max_send_attempts`; and an opaque `policy_digest`. Each message grant would additionally bind the delegation id, revision, and `policy_digest`.
+Only if operators later need independent aggregate controls, add a deliberately-reviewed **structural delegation record** carrying: `delegation_id`; monotonic `revision`; an authenticated issuer; provider/account/surface/action plus explicit conversation/listing scope; `expires_at`; `max_send_attempts`; and an opaque `policy_digest`. `policy_digest` is SHA-256 hex of the canonical key-sorted JSON of the validated policy object (Miso-supplied), using the same canonical representation as `subjectDigest`; Musebridge compares it for equality and never parses the policy. Each message grant would additionally bind the delegation id, revision, and `policy_digest`.
 
-The exact extension point is the **`send` branch** of `authorizeAction` (`src/authorization.ts`): an issuance-authenticated authorizer that atomically verifies message scope/digest/expiry **plus** active delegation revision **plus** budget, then consumes both the grant and the budget before dispatch. `read`/`prepare` behavior and the unconditional `high_consequence` refusal stay unchanged (`authorizeAction`'s `read`/`prepare` and `high_consequence` cases). This extension requires **amending [provider-action-boundaries.md](provider-action-boundaries.md) deliberately** — this document does not make that amendment; it specifies the proposed future contract only.
+The exact extension point is the **`send` branch** of `authorizeAction` (`src/authorization.ts`): an issuance-authenticated authorizer that atomically verifies message scope/digest/expiry **plus** active delegation revision **plus** budget, then consumes both the grant and the budget before dispatch. `read`/`prepare` behavior and the unconditional `high_consequence` refusal stay unchanged (`authorizeAction`'s `read`/`prepare` and `high_consequence` cases). This extension requires **amending [provider-action-boundaries.md](provider-action-boundaries.md) deliberately** — this document does not make that amendment; it specifies the proposed future contract only. The delegation record and its current revision reach enforcement through the host seam, like grants — never as tool arguments — so the `ActionRequest` shape is unchanged. Consumed delegation budget and message grants must be durable and bounded, satisfying the same rule `provider-action-boundaries.md` states for consumed grants.
 
 ## Enforcement boundary: what Musebridge can and cannot enforce
 
@@ -75,7 +75,7 @@ State separation is binding:
 
 - A nonbinding draft is `prepare` (autonomous; not authorization to send).
 - Executing a nonbinding message is `send` (single-use grant; never autonomous).
-- **Buying, accepting a binding offer, paying a deposit, exchanging sensitive contact/address data, and arranging a firm pickup time are `high_consequence`.** They are refused **unconditionally**; no delegation, envelope, or grant can override that. Enabling them later requires changing the gate explicitly, not presenting a better grant.
+- **When separately surfaced as tools (not as free text inside `send`), buying, accepting a binding offer, paying a deposit, exchanging sensitive contact/address data, and arranging a firm pickup time are `high_consequence`.** They are refused **unconditionally**; no delegation record or grant can override that. Enabling them later requires changing the gate explicitly, not presenting a better grant.
 
 **Honest limitation:** Musebridge cannot guarantee that an arbitrary free-text `send` channel contains no binding language. Without restricted message construction (a constrained template the bridge can validate) or content interpretation (which the bridge must not do), **Miso owns preventing commitments inside message text**. "Proposed price" and "accepted deal" remain distinct states: a seller's acceptance of a proposed price never auto-triggers a purchase, a deposit, or a firm arrangement — those are separate `high_consequence` decisions requiring fresh human approval.
 
@@ -106,15 +106,15 @@ The issue's "Done when" is satisfied by **controlled end-to-end dry runs**, not 
 1. A fixture-backend run of the full `prepare → approve → send → reconcile` path, with sends dispatched only through the `send` class.
 2. The run executes under the shipped deny-all authorizer **and** under a test authorizer (the `UnverifiedGrantAuthorizer` pattern), proving denial, single-use consumption, digest binding, expiry, and replay rejection without issuing real grants.
 3. Prompt-injection fixtures (seller text shaped like instructions, approvals, policy, or tool results) must not change the dispatched payload digest or trigger any `high_consequence` path.
-4. **No live automated sends until the issuance-authenticated verifier (#63 / #43) exists** and the messenger scope has its reauth target; until then production `send` is deny-all.
+4. **No live automated sends until the issuance-authenticated verifier (#43) exists and #63 is wired against it** and the messenger scope has its reauth target; until then production `send` is deny-all.
 
 ## Failure modes
 
 - **Seller text masquerading as instructions, approvals, policy, or tool results (prompt injection).** Mitigation: treat all thread content as untrusted; the grant binds the exact outgoing payload, so injected text cannot alter what is sent. Residual risk stays with Miso's reasoning.
 - **A validly authorized message that violates semantic limits** due to a Miso reasoning error. Musebridge cannot detect it; only restricted message construction (if ever adopted) would reduce it.
 - **Scope confusion** across accounts, listings, conversations, or changed defaults. Mitigation: exact scope match; explicit conversation/listing scope in the future delegation record.
-- **Non-atomic consumption or budget.** Mitigation: verify-and-consume in one synchronous step; the future extension must consume grant and budget atomically before dispatch.
-- **Revision races after supersession.** Mitigation: monotonic `revision`; a message grant binding a superseded revision is rejected.
+- **Non-atomic consumption or budget.** Mitigation: verify-and-consume in one synchronous step; the future extension must consume grant and budget atomically and durably before dispatch, per [provider-action-boundaries.md](provider-action-boundaries.md).
+- **Revision races after supersession.** Mitigation: monotonic `revision`; a message grant binding a superseded revision is rejected with `ACTION_FORBIDDEN`.
 - **Expiry checked before queued dispatch.** Define an explicit authorization/dispatch cutoff: the grant/delegation must be valid at the verification instant, and a dispatch queued past expiry is refused, not "grandfathered."
 - **Consumed-without-delivery / duplicate delivery / incomplete reconciliation.** Mitigation: idempotency token; reconcile before any retry; retry is a new Miso decision, never automatic.
 - **Policy-hash mismatch, unauthenticated issuer, or audit gaps giving false assurance.** Mitigation: issuance authentication required before production sends; `policy_digest` equality against a bridge-computed digest; audit events are required for every step.
@@ -148,4 +148,4 @@ The issue's "Done when" is satisfied by **controlled end-to-end dry runs**, not 
 3. `services/marketplace/src/authorization.ts` — `approvalGrantSchema`, `canonicalActionInput`, `subjectDigest`, `authorizeAction`, `DenyAllAuthorizer`. **Verified.**
 4. `services/marketplace/src/tools.ts` — `TOOLS`, `assertWritableToolsHaveAuthorizer`, dispatch through `authorizeAction`. **Verified.**
 5. `services/marketplace/src/domain.ts` — risk/error code schemas (`runtimeErrorCodeSchema`, `APPROVAL_REQUIRED`, `ACTION_FORBIDDEN`). **Verified.**
-6. Issue #41 — gate and risk classes; Issue #43 / #62 / #63 — send primitives (prepare, send, issuance-authenticated verification); Issue #38 — parent program. **Verified (tracker context; contracts to merge before implementation).**
+6. Issue #41 — gate and risk classes; Issue #43 (send primitives; #62 and #63 are its sub-issues); Issue #38 — parent program. **Verified (tracker context; contracts to merge before implementation).**
