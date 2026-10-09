@@ -49,6 +49,11 @@ describe('TicketmasterClient', () => {
     await expect(client.getEvent('synthetic')).rejects.toMatchObject({ status: 429, retryAfter: undefined });
   });
 
+  it('truncates a malformed fractional retry-after to an integer', async () => {
+    const client = new TicketmasterClient({ ...options, fetchImpl: async () => new Response('', { status: 429, headers: { 'retry-after': '3.5' } }) });
+    await expect(client.getEvent('synthetic')).rejects.toMatchObject({ status: 429, retryAfter: 3 });
+  });
+
   it('validates the API key and restricts the credential destination', () => {
     expect(() => new TicketmasterClient({ ...options, apiKey: '  ' })).toThrow(TypeError);
     expect(() => new TicketmasterClient({ ...options, apiKey: '' })).toThrow(TypeError);

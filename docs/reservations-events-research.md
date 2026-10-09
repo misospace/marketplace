@@ -107,7 +107,7 @@ Mapping notes:
 | `events_search` | `read` | `(ticketmaster, default, events)` | Searches the configured events source and returns bounded `eventAvailability` facts |
 | `events_fetch` | `read` | `(ticketmaster, default, events)` | Fetches one event by id from the configured events source |
 
-Configuration: `EVENTS_BACKEND=fixture|ticketmaster` (default `fixture`, so the tool list is stable without keys, mirroring the shopping opt-in pattern). Key material comes from `TICKETMASTER_API_KEY` in the environment at call time and is never logged or returned.
+Configuration: `EVENTS_BACKEND=fixture|ticketmaster` (default `fixture`, so the tool list is stable without keys, mirroring the shopping opt-in pattern). Key material is read from `TICKETMASTER_API_KEY` in the environment when the service constructs the Ticketmaster client, and is never logged or returned.
 
 Output envelopes:
 
