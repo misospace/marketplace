@@ -27,43 +27,49 @@ Evaluated in order; take the first route that fits, and record why later routes 
 
 ## Decision table
 
-`Class`: **R** read, **W** external write, **X** high-consequence/sensitive. `Decision`: **Native** (OpenClaw/native tooling), **Integrate** (provider API/OAuth or existing connector), **Connector** (Composio/hosted, replaceable low/moderate sensitivity), **Musebridge** (missing consumer capability), **Outside bridge** (local device/OS).
+`Risk class`: one of the boundary contract's exact four classes — **read**, **prepare**, **send**, **high_consequence**. Reconciliation: reads map to `read`; drafts map to `prepare`; external delivery or any write with an external effect maps to `send`; purchases, payments, irreversible actions, and safety-critical commands map to `high_consequence` (refused unconditionally). Sensitivity is recorded separately in the trailing `Sensitivity / permissions` column and never in the risk class. `Decision`: **Native** (OpenClaw/native tooling), **Integrate** (provider API/OAuth or existing connector), **Connector** (Composio/hosted, replaceable low/moderate sensitivity), **Musebridge** (missing consumer capability), **Outside bridge** (local device/OS), **Refused** (`high_consequence`; refused unconditionally by [`provider-action-boundaries.md`](provider-action-boundaries.md) — no grant can enable it; this is the decision-tree option-6 "No reliable/permitted route" for policy cases).
 
-| Category | User-visible action | Likely access path | Class | Decision | Unmet behavior worth engineering? | Sensitivity / permissions |
+| Category | User-visible action | Likely access path | Risk class | Decision | Unmet behavior worth engineering? | Sensitivity / permissions |
 |---|---|---|---|---|---|---|
-| Productivity | Search/read Gmail messages and threads | Gmail API, OAuth user consent (Verified root) | R | Integrate | Content summarization/triage is OpenClaw's job | Mail content; restricted scopes; opt-in |
-| Productivity | Draft and send Gmail | Gmail API, OAuth | W/X | Integrate | Draft is `prepare`; send needs operator approval | Sends as the user; high trust |
-| Productivity | Read Google Calendar events/free-busy | Calendar API, OAuth (Verified root) | R | Integrate | Ranking/agenda is OpenClaw's job | Calendar contents; opt-in |
-| Productivity | Create/modify Google Calendar events | Calendar API, OAuth | W | Integrate | Proposal/diff is `prepare`; commit is `send`-like | Alters shared calendars |
-| Productivity | List/read Google Drive files and metadata | Drive API, OAuth (Verified root) | R | Integrate | Search/ranking is OpenClaw's job | File metadata/content; restricted scopes |
-| Productivity | Open a Google Doc's text | Docs API, OAuth (Verified root) | R | Integrate | Summarize/edit-plan is OpenClaw's job | Document content |
-| Productivity | Read Outlook mail / Microsoft 365 | Microsoft Graph, OAuth (Verified root) | R | Integrate | Triage logic stays consumer-side | Mail/tenant content; admin consent possible |
-| Productivity | Send Outlook mail, manage Microsoft calendar | Microsoft Graph, OAuth | W/X | Integrate | `prepare`/`send` split as with Gmail | Sends as the user; tenant policy |
-| Productivity | Read Slack channels/threads/DMs | Slack Web API, OAuth (Verified root) | R | Integrate | Summarization stays consumer-side | Workspace content; admin install may gate |
-| Productivity | Post a Slack message | Slack Web API, OAuth | W | Integrate | Approval owned by OpenClaw | Posts as the user/bot |
-| Productivity | Read GitHub notifications, issues, PRs | GitHub REST API / native tooling (Verified root) | R | Native | Mostly already a native developer surface | Repo visibility; token scope |
-| Productivity | Create GitHub issue/comment/PR | GitHub REST API | W | Integrate | Review before write is `prepare` | Writes to public/private repos |
-| Productivity | Read/append Notion pages and databases | Notion API, OAuth (Verified root) | R/W | Integrate | Ranking stays consumer-side | Page content; integration grants |
-| Productivity | Read/upload Box or Drive-style work files | Vendor APIs (Box/Drive), OAuth | R/W | Integrate | Heavy transfer stays outside the bridge | File content; DLP policy |
-| Media | Read Spotify library/playlists/recent | Spotify Web API, OAuth (Verified root) | R | Integrate | Taste modeling stays consumer-side | Listening history; opt-in |
-| Media | Control Spotify playback (play/pause/skip/queue) | Spotify Web API, user OAuth; playback control may require a premium account (Assumed detail) | W | Integrate | Preference/ranking owned by OpenClaw | Device control; low sensitivity |
-| Media | Ask for media recommendations/dedup | Local reasoning over library metadata | R | Native | Core consumer-side value | None beyond library already read |
-| Media | Control smart-home devices (lights, thermostat, plugs) | Vendor clouds and/or a Matter/local hub | W | Connector | Vendor-agnostic control is a hosted-connector fit | Home presence/occupancy; moderate |
-| Media | Remote car commands (lock, climate, charge) | Manufacturer app API, if any | X | Outside bridge | Safety-critical; not a reasoning-layer action | Physical consequences; do not automate |
-| Finances | Read balances and transactions | Plaid-class aggregation, OAuth (Verified root) | R/X | Integrate | Spending analysis stays in OpenClaw | Financial data; strongly opt-in, never centralized |
-| Finances | Categorize and analyze spending | Local reasoning over already-read transactions | R | Native | Core consumer-side value; no new data store | Derived from opt-in source only |
-| Finances | Initiate payment/transfer or move money | No sanctioned consumer route for this operator | X | Outside bridge | None: `high_consequence` is refused unconditionally | Irreversible; never automated |
-| Health | Read Apple Health data (steps, heart, sleep) | HealthKit, on-device (Verified root) | X | Outside bridge | Belongs in OpenClaw's local layer, not a provider bridge | Device-local health data; opt-in |
-| Health | Read Android Health Connect data | Health Connect, on-device (Verified root) | X | Outside bridge | Same local-layer reasoning as HealthKit | Device-local health data; opt-in |
-| Health | Read Fitbit/Google health and activity | Fitbit Web API, OAuth (Verified root) | X | Integrate | Trend summarization stays consumer-side | Health data; opt-in |
-| Health | Read Oura ring sleep/readiness | Oura API, OAuth (Verified root) | X | Integrate | Correlation across sources stays consumer-side | Health data; opt-in |
-| Health | Read Withings scale/BP | Withings API, OAuth (Verified root) | X | Integrate | Same posture as Oura | Health data; opt-in |
-| Health | Read Garmin activities/health | Garmin Health API (partner program, gated) (Verified root) | X | Integrate | Only if operator qualifies; else blocked | Health data; program approval |
-| Messaging | Read/send Android SMS and personal messages | No public third-party SMS API; default-SMS-app role | X | Outside bridge | Belongs in OpenClaw's local device layer | Intimate content; never centralized |
-| Desktop | Read/write local files (macOS/Windows/Linux) | OS filesystem via local agent | R/W | Outside bridge | Native to the local OpenClaw layer | Local files; operator-owned |
-| Desktop | Clipboard / open or drive a local app | OS automation locally | R/W | Outside bridge | Local computer-use, not a provider | Local; operator-owned |
+| Productivity | Search/read Gmail messages and threads | Gmail API, OAuth user consent (Verified root) | read | Integrate | Content summarization/triage is OpenClaw's job | Mail content; restricted scopes; opt-in |
+| Productivity | Draft Gmail messages | Gmail API, OAuth | prepare | Integrate | Draft is `prepare`, never authorization to send | Draft content; opt-in |
+| Productivity | Send Gmail | Gmail API, OAuth | send | Integrate | External delivery always needs operator approval | Sends as the user; high trust |
+| Productivity | Read Google Calendar events/free-busy | Calendar API, OAuth (Verified root) | read | Integrate | Ranking/agenda is OpenClaw's job | Calendar contents; opt-in |
+| Productivity | Create/modify Google Calendar events | Calendar API, OAuth | send | Integrate | Proposal/diff is `prepare`; commit is `send` | Alters shared calendars |
+| Productivity | List/read Google Drive files and metadata | Drive API, OAuth (Verified root) | read | Integrate | Search/ranking is OpenClaw's job | File metadata/content; restricted scopes |
+| Productivity | Open a Google Doc's text | Docs API, OAuth (Verified root) | read | Integrate | Summarize/edit-plan is OpenClaw's job | Document content |
+| Productivity | Read Outlook mail / Microsoft 365 | Microsoft Graph, OAuth (Verified root); personal Outlook.com scope coverage is narrower than Microsoft 365 (Assumed) | read | Integrate | Triage logic stays consumer-side | Mail/tenant content; admin consent possible |
+| Productivity | Send Outlook mail, manage Microsoft calendar | Microsoft Graph, OAuth; personal Outlook.com scope coverage is narrower than Microsoft 365 (Assumed) | send | Integrate | `prepare`/`send` split as with Gmail | Sends as the user; tenant policy |
+| Productivity | Read Slack channels/threads/DMs | Slack Web API, OAuth (Verified root) | read | Integrate | Summarization stays consumer-side | Workspace content; admin install may gate |
+| Productivity | Post a Slack message | Slack Web API, OAuth | send | Integrate | Approval owned by OpenClaw | Posts as the user/bot |
+| Productivity | Read GitHub notifications, issues, PRs | GitHub REST API / native tooling (Verified root) | read | Native | Mostly already a native developer surface | Repo visibility; token scope |
+| Productivity | Create GitHub issue/comment/PR | GitHub REST API | send | Integrate | Review before write is `prepare` | Writes to public/private repos |
+| Productivity | Read Notion pages/databases | Notion API, OAuth (Verified root) | read | Integrate | Ranking stays consumer-side | Page content; integration grants |
+| Productivity | Append/edit Notion pages | Notion API, OAuth | send | Integrate | Review before write is `prepare` | Page content; integration grants |
+| Productivity | Read Box work files | Box API, OAuth (Verified root) | read | Integrate | Ranking stays consumer-side | File content; DLP policy |
+| Productivity | Upload Box work files | Box API, OAuth | send | Integrate | Heavy transfer stays outside the bridge | File content; DLP policy |
+| Media | Read Spotify library/playlists/recent | Spotify Web API, OAuth (Verified root) | read | Integrate | Taste modeling stays consumer-side | Listening history; opt-in |
+| Media | Control Spotify playback (play/pause/skip/queue) | Spotify Web API, user OAuth; playback control requires a Premium account (Verified) | send | Integrate | Preference/ranking owned by OpenClaw | Device control; low sensitivity |
+| Media | Ask for media recommendations/dedup | Local reasoning over library metadata | read | Native | Core consumer-side value | None beyond library already read |
+| Media | Control smart-home devices (lights, thermostat, plugs) | Hosted connector aggregating vendor clouds (replaceable; not a raw local hub) | send | Connector | Vendor-agnostic control is a hosted-connector fit | Home presence/occupancy; moderate |
+| Media | Remote car commands (lock, climate, charge) | Manufacturer app API, if any | high_consequence | Refused | Safety-critical; not a reasoning-layer action | Physical consequences; do not automate |
+| Finances | Read balances and transactions | Plaid-class aggregation, OAuth (Verified root) | read | Integrate | Spending analysis stays in OpenClaw | Financial data; strongly opt-in, never centralized |
+| Finances | Categorize and analyze spending | Local reasoning over already-read transactions | read | Native | Core consumer-side value; no new data store | Derived from opt-in source only |
+| Finances | Initiate payment/transfer or move money | No sanctioned consumer route for this operator | high_consequence | Refused | None: `high_consequence` is refused unconditionally | Irreversible; never automated |
+| Health | Read Apple Health data (steps, heart, sleep) | HealthKit, on-device (Verified root) | read | Outside bridge | Belongs in OpenClaw's local layer, not a provider bridge | Device-local health data; opt-in |
+| Health | Read Android Health Connect data | Health Connect, on-device (Verified root) | read | Outside bridge | Same local-layer reasoning as HealthKit | Device-local health data; opt-in |
+| Health | Read Fitbit/Google health and activity | Fitbit Web API, OAuth (Verified root) | read | Integrate | Trend summarization stays consumer-side | Health data; opt-in |
+| Health | Read Oura ring sleep/readiness | Oura API, OAuth (Verified root) | read | Integrate | Correlation across sources stays consumer-side | Health data; opt-in |
+| Health | Read Withings scale/BP | Withings API, OAuth (Verified root) | read | Integrate | Same posture as Oura | Health data; opt-in |
+| Health | Read Garmin activities/health | Garmin Health API (partner program, gated) (Verified root) | read | Integrate | Only if operator qualifies; else blocked | Health data; program approval |
+| Messaging | Read Android SMS and personal messages | No public third-party SMS API; default-SMS-app role | read | Outside bridge | Belongs in OpenClaw's local device layer | Intimate content; never centralized |
+| Messaging | Send Android SMS/personal messages | Default-SMS-app role, on-device; no sanctioned third-party API | send | Outside bridge | Local device capability, not a provider bridge | Intimate content; never centralized |
+| Desktop | Read local files (macOS/Windows/Linux) | OS filesystem via local agent | read | Outside bridge | Native to the local OpenClaw layer | Local files; operator-owned |
+| Desktop | Write/modify local files | OS filesystem via local agent | send | Outside bridge | Native to the local OpenClaw layer | Local files; operator-owned |
+| Desktop | Read clipboard | OS automation locally | read | Outside bridge | Local computer-use, not a provider | Local; operator-owned |
+| Desktop | Open/drive a local app | OS automation locally | send | Outside bridge | Local computer-use, not a provider | Local; operator-owned |
 
-Honest result: the high-value actions resolve to **Integrate**, **Native**, or **Outside bridge**; a **Connector** fits only vendor-agnostic smart-home control, and **no row requires a new Musebridge browser-backed provider**. See [Truly missing capabilities](#truly-missing-capabilities).
+Honest result: the high-value actions resolve to **Integrate**, **Native**, **Outside bridge**, or **Refused**; a **Connector** fits only vendor-agnostic smart-home control, and **no row requires a new Musebridge browser-backed provider**. Decision-tree option 5 (the generic browser/computer workaround) exists but is unused this wave. See [Truly missing capabilities](#truly-missing-capabilities).
 
 ## Category findings
 
@@ -81,15 +87,15 @@ Verdict: **Integrate** for every productivity action; **Native** for GitHub read
 
 ### Media
 
-Access paths evaluated: Spotify Web API with OAuth (Verified root) for library reads and playback control; vendor clouds plus Matter/local hubs for smart-home control; manufacturer app APIs (if any) for cars. Media recommendation/ranking is native reasoning.
+Access paths evaluated: Spotify Web API with OAuth (Verified root) for library reads and playback control; a hosted connector aggregating vendor clouds (replaceable) for smart-home control; manufacturer app APIs (if any) for cars. Media recommendation/ranking is native reasoning.
 
-What is Verified/Reported/Assumed: Spotify's API and OAuth are Verified; that playback *control* (not just metadata) requires the account to have a premium subscription is **Assumed** and must be confirmed against the operator's account and current docs. Smart-home vendor coverage is fragmented and **Reported**; a vendor-agnostic hosted connector is the pragmatic route but is replaceable and moderate-sensitivity. Car command APIs are **Assumed** and often closed.
+What is Verified/Reported/Assumed: Spotify's API and OAuth are Verified, and that user-authenticated playback *control* (not just metadata) requires the account to be Premium is **Verified** at capability level. Smart-home vendor coverage is fragmented and **Reported**; a vendor-agnostic hosted connector is the pragmatic route but is replaceable and moderate-sensitivity. Car command APIs are **Assumed** and often closed.
 
 Permissions/scopes that matter: user-authorized playback control, device targeting, and home-hub account linking. Car commands are safety-critical and carry physical consequences.
 
 Data-sensitivity posture: listening history and home occupancy are personal but moderate; car control is high-consequence and should not run autonomously.
 
-Verdict: **Integrate** Spotify (read + control); **Connector** for vendor-agnostic smart-home control with an explicit replaceability note; **Outside bridge** for car commands, which are not a reasoning-layer action.
+Verdict: **Integrate** Spotify (read + control); **Connector** for vendor-agnostic smart-home control with an explicit replaceability note; **Refused** for car commands, which are `high_consequence` and not a reasoning-layer action.
 
 ### Finances
 
@@ -97,11 +103,11 @@ Access paths evaluated: Plaid-class aggregation with OAuth (Verified root) for b
 
 What is Verified/Reported/Assumed: the aggregation model (institution linking, OAuth, read of balances/transactions) is Verified at capability level. Institution coverage, per-institution MFA/refresh behavior, and pricing are **Reported/Assumed** and must be confirmed for the operator. Money movement through this class is not available to a personal read-only agent.
 
-Permissions/scopes that matter: read of balances and transactions is `read`-class data but **X**-sensitive; it must never be centralized or logged. Payment initiation is `high_consequence`.
+Permissions/scopes that matter: reading balances and transactions is a `read` action with high sensitivity; it must never be centralized or logged. Payment initiation is `high_consequence`.
 
 Data-sensitivity posture: the most sensitive consumer category here. Opt-in, minimized, never stored in Musebridge, and analysis happens where the data already is (OpenClaw's local layer).
 
-Verdict: **Integrate** read-only aggregation behind strict opt-in; **Native** for analysis; **Outside bridge** (blocked) for transfers, which `provider-action-boundaries.md` refuses unconditionally.
+Verdict: **Integrate** read-only aggregation behind strict opt-in; **Native** for analysis; **Refused** for transfers, which `provider-action-boundaries.md` refuses unconditionally.
 
 ### Health
 
@@ -111,7 +117,7 @@ What is Verified/Reported/Assumed: the on-device nature of HealthKit/Health Conn
 
 Permissions/scopes that matter: health data is the most sensitive category; every source is opt-in, and on-device stores should be read by the local OpenClaw layer rather than bridged. Cloud APIs require explicit OAuth grants and possibly app review.
 
-Data-sensitivity posture: X across the board. Do not centralize; read locally where possible, and treat cloud reads as opt-in, minimized, and unlogged.
+Data-sensitivity posture: high sensitivity across the board (recorded in the sensitivity column, not the risk class). Do not centralize; read locally where possible, and treat cloud reads as opt-in, minimized, and unlogged.
 
 Verdict: **Outside bridge** for Apple/Android on-device data; **Integrate** (opt-in) for Fitbit, Oura, and Withings; Garmin only if the operator qualifies, otherwise blocked.
 
@@ -123,7 +129,7 @@ What is Verified/Reported/Assumed: the absence of a sanctioned third-party SMS r
 
 Permissions/scopes that matter: intimate content; device-local. This is a local-device capability, not a cloud provider surface.
 
-Data-sensitivity posture: X. Never centralized in Musebridge.
+Data-sensitivity posture: high sensitivity. Never centralized in Musebridge.
 
 Verdict: **Outside bridge** — belongs in OpenClaw's local device layer, not this provider bridge.
 
@@ -141,14 +147,14 @@ Verdict: **Outside bridge** — native to the local OpenClaw layer.
 
 ## Truly missing capabilities
 
-No action in this wave is a genuinely missing **consumer-specific Musebridge capability**. By design, the actions either (a) already have a first-party API that OpenClaw's MCP/provider layer can call (**Integrate**), (b) are already native reasoning/tooling (**Native**), or (c) are local-device or OS capabilities that belong in OpenClaw's local layer and must not be centralized in a cloud provider bridge (**Outside bridge**). In particular, Android SMS and Apple/Android health data are device-local and sensitive; bridging them through Musebridge would add a copy of intimate data for no capability gain. Money movement is refused by policy, not shipped as a bridge. Smart-home control is a hosted-connector concern, not a Musebridge surface.
+No genuinely missing consumer-specific Musebridge capability was found in this wave, so the literal issue #51 ask — identify a missing capability that warrants a focused issue — resolves to none and **no focused capability issue is filed**. Every action either (a) already has a first-party API that OpenClaw's MCP/provider layer can call (**Integrate**), (b) is already native reasoning/tooling (**Native**), (c) is a local-device or OS capability that belongs in OpenClaw's local layer and must not be centralized in a cloud provider bridge (**Outside bridge**), or (d) is refused by policy (**Refused**). In particular, Android SMS and Apple/Android health data are device-local and sensitive; bridging them through Musebridge would add a copy of intimate data for no capability gain. Money movement and car commands are refused unconditionally by policy, not shipped as bridges. Smart-home control is a hosted-connector concern, not a Musebridge surface.
 
-Candidate follow-ups (scope only; no GitHub issue created here):
+Two documentation/authorization-hygiene candidates were considered and are deliberately **not filed as capability issues**, because neither is capability-shaped:
 
-- **Operator-authorization checklist for productivity/provider access** — confirm restricted-scope Google review, Microsoft tenant consent, Slack admin install, and GitHub token scope at registration time.
+- **Operator-authorization checklist for productivity/provider access** — confirm restricted-scope Google review, Microsoft tenant consent (and personal Outlook.com endpoint coverage), Slack admin install, and GitHub token scope at registration time.
 - **Consumer sensitivity classification note** — extend `provider-action-boundaries.md` guidance with finance/health as explicit opt-in, non-centralized categories.
 
-Neither is a bridge deliverable; both are documentation/authorization hygiene. If the operator later wants a missing surface that fits the browser-backed criteria (repeatable session, structured extraction, stable contract, classified failures), that should be a new, separately justified issue — not assumed here.
+Both are hygiene, not bridge deliverables. If the operator later wants a missing surface that fits the browser-backed criteria (repeatable session, structured extraction, stable contract, classified failures), that should be a new, separately justified issue — not assumed here.
 
 ## Safety, privacy, and boundaries
 
@@ -166,6 +172,7 @@ Mapped to [`provider-action-boundaries.md`](provider-action-boundaries.md):
 **Verified (capability-level, primary roots cited in [Sources](#sources)):**
 
 - First-party OAuth APIs exist for Google Gmail/Calendar/Drive/Docs, Microsoft Graph, Slack, GitHub, Notion, Box, Spotify, Plaid-class aggregation, Fitbit, Oura, and Withings.
+- User-authenticated Spotify playback control requires a Premium account.
 - Apple HealthKit and Android Health Connect are on-device stores without a server-side consumer read API.
 - Garmin Health is a gated partner program.
 - Android restricts SMS read/send to the default SMS app; no public third-party API exists.
@@ -174,13 +181,12 @@ Mapped to [`provider-action-boundaries.md`](provider-action-boundaries.md):
 **Assumed / to verify before any tool is treated as reliable:**
 
 1. Google restricted-scope verification/security-review requirement for this operator's production use.
-2. Microsoft Graph mail/calendar consent feasibility for the operator's tenant.
+2. Microsoft Graph mail/calendar consent feasibility for the operator's tenant, and whether personal Outlook.com endpoint coverage of mail/calendar scopes is sufficient (it is narrower than Microsoft 365).
 3. Slack/GitHub/Notion/Box workspace admin/installation and token-scope realities.
-4. Spotify playback control requiring a premium account.
-5. Smart-home vendor coverage and whether a vendor-agnostic connector suffices.
-6. Institution coverage, MFA/refresh behavior, and pricing for Plaid-class aggregation.
-7. Per-source health data fields, cadence, and Garmin partner eligibility.
-8. All exact endpoint paths and scope strings — intentionally unstated until confirmed against vendor docs.
+4. Smart-home vendor coverage and whether a vendor-agnostic connector suffices.
+5. Institution coverage, MFA/refresh behavior, and pricing for Plaid-class aggregation.
+6. Per-source health data fields, cadence, and Garmin partner eligibility.
+7. All exact endpoint paths and scope strings — intentionally unstated until confirmed against vendor docs.
 
 **Validation plan.** For each intended source, an operator (a) confirms the vendor's program/consent requirements and obtains credentials or OAuth out-of-band, (b) reads the live documentation root to pin actual scopes/endpoints, and (c) exercises one real read (or a fixture-only check where access is unavailable), recording findings back into this record. Synthetic fixtures alone do **not** prove a live connector; a source stays Assumed until a real authorized call succeeds and its output matches the contract.
 
@@ -198,16 +204,20 @@ Mapped to [`provider-action-boundaries.md`](provider-action-boundaries.md):
 10. Oura API — https://developer.ouraring.com
 11. Withings API — https://developer.withings.com
 12. Fitbit Web API — https://dev.fitbit.com
-13. Garmin Health API — https://developer.garmin.com
+13. Garmin Health API — https://developer.garmin.com/gc-developer-program/health-api/
+14. GitHub REST API — https://docs.github.com/rest
+15. Slack API — https://api.slack.com
+16. Notion API — https://developers.notion.com
+17. Box API — https://developer.box.com
 
-GitHub, Slack, Notion, and Box first-party developer documentation roots exist and are Stable/Verified, but are not enumerated here to keep the registry to roots this record relies on most directly. Third-party connector inventories (Composio and the community MCP ecosystem) are **Reported leads only**; no package name or version is asserted.
+Third-party connector inventories (Composio and the community MCP ecosystem) are **Reported leads only**; no package name or version is asserted.
 
 ## Deliberate gaps
 
 - **No account access.** This wave authorizes nothing; it only decides routes.
-- **No Musebridge bridge build.** Everything resolves to Integrate/Native/Outside/Connector; the browser-backed route is unused.
+- **No Musebridge bridge build.** Everything resolves to Integrate/Native/Outside bridge/Connector/Refused; the browser-backed route is unused.
 - **No centralized personal-data store.** Finance and health are explicitly not mirrored into Musebridge.
 - **No money movement, no car commands.** Both are `high_consequence` and out of scope.
 - **No exact scopes/endpoints/rate limits.** Capability-level only until operator validation.
 - **No Composio-specific commitment.** Hosted connectors are described as replaceable, not selected by name.
-- **No new GitHub issues.** Candidate follow-ups are listed as scope lines only.
+- **No new GitHub issues.** No capability issue is filed because nothing capability-shaped was missing; the two hygiene candidates are explicitly not filed as capability issues.
