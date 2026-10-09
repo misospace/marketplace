@@ -1,6 +1,6 @@
 # Shopping provider research (#48)
 
-Parent: #38 (verticals). Issue: #48. Status: research complete, awaiting provider-choice confirmation before implementation.
+Parent: #38 (verticals). Issue: #48. Status: research complete, awaiting provider-choice confirmation before implementation. The consolidated cross-capability inventory and integration-path decision record is [`capability-inventory.md`](capability-inventory.md) (#39); this document remains authoritative for the shopping vertical.
 
 ## What the shopping vertical needs
 
