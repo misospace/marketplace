@@ -13,7 +13,7 @@ import { chromium } from 'playwright';
 import { BrowserSessionManager } from '../src/browser.js';
 import { ProviderError } from '../src/index.js';
 import { facebookCredentialsFromEnv } from '../src/facebook-login.js';
-import { createMarketplaceService, type MarketplaceService, parseBackendKind, parseBackendTimeout, parseLoginWaitMs, parseMessengerEnabled, parseShoppingBackendKind } from '../src/service.js';
+import { createMarketplaceService, type MarketplaceService, parseBackendKind, parseBackendTimeout, parseEventsBackendKind, parseLoginWaitMs, parseMessengerEnabled, parseShoppingBackendKind } from '../src/service.js';
 import * as packageEntry from '../src/index.js';
 import { runBackendOperation } from '../src/tools.js';
 import { threadsListInputSchema, threadReadInputSchema } from '../src/domain.js';
@@ -302,7 +302,7 @@ describe('fixture MCP service', () => {
     expect(client.getServerVersion()).toEqual({ name: 'marketplace', version: '0.1.0' });
     const tools = await client.listTools();
     expect(tools.tools.map(({ name }) => name)).toEqual([
-      'marketplace_search', 'marketplace_fetch', 'marketplace_status', 'shopping_search', 'shopping_fetch', 'messenger_threads_list', 'messenger_thread_read'
+      'marketplace_search', 'marketplace_fetch', 'marketplace_status', 'shopping_search', 'shopping_fetch', 'events_search', 'events_fetch', 'messenger_threads_list', 'messenger_thread_read'
     ]);
     expect(tools.tools.map(({ description }) => description)).toEqual([
       'Search marketplace listings.',
@@ -310,6 +310,8 @@ describe('fixture MCP service', () => {
       'Report service and schema versions, the configured backend name, and the Facebook session state.',
       'Search one configured shopping source for products with prices, availability, and provenance. Read-only.',
       'Fetch one product offer by canonical ID or URL from the configured shopping source. Read-only.',
+      'Search one configured events source for read-only availability: on-sale status, date/time, price ranges, and venue. Read-only.',
+      "Fetch one event's read-only availability by canonical ID or URL from the configured events source. Read-only.",
       'List recent seller conversation threads from the Facebook Marketplace inbox. Read-only.',
       'Read the messages of one marketplace conversation thread by ID. Read-only, but opening the thread marks it "Seen" for the other participant.'
     ]);
@@ -366,6 +368,7 @@ describe('fixture MCP service', () => {
     expect(structured(await client.callTool({ name: 'shopping_fetch', arguments: { url: 'https://www.example.com/ebay/item/synth-battery-002#details' } })).offer)
       .toEqual(FIXTURE_OFFERS[1]);
     expect(structured(await client.callTool({ name: 'marketplace_status', arguments: {} })).shopping_backend).toBe('fixture');
+    expect(structured(await client.callTool({ name: 'marketplace_status', arguments: {} })).events_backend).toBe('fixture');
     expect(z.toJSONSchema(z.object({ value: z.string() })).type).toBe('object');
   });
 
@@ -505,6 +508,32 @@ describe('fixture MCP service', () => {
     expect(() => createMarketplaceService()).toThrow(/EBAY_CLIENT_ID/);
   });
 
+  it('parses events backend selection and requires a Ticketmaster key only when selected', () => {
+    expect(parseEventsBackendKind(undefined)).toBe('fixture');
+    expect(parseEventsBackendKind('ticketmaster')).toBe('ticketmaster');
+    expect(() => parseEventsBackendKind('other')).toThrow(new RangeError('EVENTS_BACKEND must be either "fixture" or "ticketmaster"'));
+    vi.stubEnv('EVENTS_BACKEND', 'ticketmaster');
+    vi.stubEnv('TICKETMASTER_API_KEY', '');
+    expect(() => createMarketplaceService()).toThrow(/TICKETMASTER_API_KEY/);
+  });
+
+  it('serves read-only event availability through the fixture backend', async () => {
+    const client = await connectClient();
+    const search = structured(await client.callTool({ name: 'events_search', arguments: { query: 'synthetic' } }));
+    expect(search.backend).toBe('fixture');
+    expect(search.events.length).toBeGreaterThan(0);
+    for (const event of search.events) {
+      expect(event.provider).toBe('ticketmaster');
+      expect(['on_sale', 'off_sale', 'sold_out', 'cancelled', 'postponed', 'rescheduled', 'unknown']).toContain(event.status);
+    }
+    const filtered = structured(await client.callTool({ name: 'events_search', arguments: { query: 'orchestra', city: 'portland' } }));
+    expect(filtered.events.map((event: { id: string }) => event.id)).toEqual(['synth-event-001']);
+    const fetched = structured(await client.callTool({ name: 'events_fetch', arguments: { id: 'synth-event-001' } }));
+    expect(fetched.event.name).toBe('SYNTHETIC Evening Orchestra');
+    const missing = structured(await client.callTool({ name: 'events_fetch', arguments: { id: 'synth-event-missing' } }));
+    expect(missing).toEqual({ ok: false, error: { code: 'NOT_FOUND', message: 'No event matched the supplied identifier.' } });
+  });
+
   it('enables Messenger only for MARKETPLACE_MESSENGER=1', () => {
     expect(parseMessengerEnabled(undefined)).toBe(false);
     expect(parseMessengerEnabled('1')).toBe(true);
@@ -528,7 +557,8 @@ describe('fixture MCP service', () => {
       schema_version: '1.1.0',
       backend: 'status-only',
       facebook_session: { status: 'session_unknown' },
-      shopping_backend: 'fixture'
+      shopping_backend: 'fixture',
+      events_backend: 'fixture'
     });
     expect(service.browser.getInfo().browserStarted).toBe(false);
     expect(backend.search).not.toHaveBeenCalled();

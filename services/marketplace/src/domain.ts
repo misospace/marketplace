@@ -212,7 +212,8 @@ export const statusSuccessSchema = z.object({
   schema_version: z.literal(SCHEMA_VERSION),
   backend: backendNameSchema,
   facebook_session: facebookSessionSchema.optional(),
-  shopping_backend: backendNameSchema.optional()
+  shopping_backend: backendNameSchema.optional(),
+  events_backend: backendNameSchema.optional()
 }).strict();
 
 export const searchOutputSchema = z.union([searchSuccessSchema, runtimeFailureSchema]);
@@ -232,6 +233,54 @@ export const shoppingFetchSuccessSchema = z.object({
 
 export const shoppingSearchOutputSchema = z.union([shoppingSearchSuccessSchema, runtimeFailureSchema]);
 export const shoppingFetchOutputSchema = z.union([shoppingFetchSuccessSchema, runtimeFailureSchema]);
+
+// Cross-site events availability surface (#50). Read-only, sibling to `productOffer`: the
+// Discovery API reports event-level on-sale status and price ranges only, never seat-level
+// inventory, so `sold_out` is deliberately not produced by the live provider.
+export const eventStatusSchema = z.enum(['on_sale', 'off_sale', 'sold_out', 'cancelled', 'postponed', 'rescheduled', 'unknown']);
+
+export const eventAvailabilitySchema = z.object({
+  provider: z.literal('ticketmaster'),
+  id: listingIdSchema,
+  url: httpUrlSchema,
+  name: z.string().min(1).max(256),
+  starts_at: isoDateTimeSchema.nullable(),
+  timezone: z.string().min(1).max(64).nullable(),
+  status: eventStatusSchema,
+  price_min: z.number().finite().nonnegative().nullable(),
+  price_max: z.number().finite().nonnegative().nullable(),
+  currency: currencyCodeSchema.nullable(),
+  venue: z.string().min(1).max(256).nullable(),
+  location: z.string().max(MAX_LOCATION_LENGTH).nullable(),
+  on_sale_start: isoDateTimeSchema.nullable(),
+  on_sale_end: isoDateTimeSchema.nullable(),
+  classifications: z.array(z.string().min(1).max(64)).max(6),
+  images: z.array(httpUrlSchema).max(6)
+}).strict();
+
+export type EventAvailability = z.infer<typeof eventAvailabilitySchema>;
+
+export const eventsSearchInputSchema = z.object({
+  query: z.string().trim().min(1).max(MAX_QUERY_LENGTH).regex(/\S/),
+  city: z.string().trim().min(1).max(MAX_LOCATION_LENGTH).optional(),
+  start_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Must be a YYYY-MM-DD date').optional(),
+  end_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Must be a YYYY-MM-DD date').optional(),
+  limit: z.number().int().min(1).max(20).default(10)
+}).strict().refine((input) => input.start_date === undefined || input.end_date === undefined || input.start_date <= input.end_date, { message: 'start_date must be on or before end_date', path: ['end_date'] });
+
+export const eventsFetchInputSchema = z.object({
+  id: z.string().min(1).max(MAX_LISTING_ID_LENGTH).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/).optional(),
+  url: httpUrlSchema.optional()
+}).strict().refine((input) => Number(input.id !== undefined) + Number(input.url !== undefined) === 1, { message: 'Provide exactly one of id or url' });
+
+export type EventsSearchInput = z.infer<typeof eventsSearchInputSchema>;
+export type EventsFetchInput = z.infer<typeof eventsFetchInputSchema>;
+
+export const eventsSearchSuccessSchema = z.object({ ok: z.literal(true), backend: backendNameSchema, events: z.array(eventAvailabilitySchema).max(20) }).strict();
+export const eventsFetchSuccessSchema = z.object({ ok: z.literal(true), backend: backendNameSchema, event: eventAvailabilitySchema }).strict();
+export const eventsSearchOutputSchema = z.union([eventsSearchSuccessSchema, runtimeFailureSchema]);
+export const eventsFetchOutputSchema = z.union([eventsFetchSuccessSchema, runtimeFailureSchema]);
+
 export const statusOutputSchema = statusSuccessSchema;
 export const threadsListOutputSchema = z.union([
   z.object({
