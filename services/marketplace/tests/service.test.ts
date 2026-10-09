@@ -7,13 +7,13 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { CallToolResultSchema, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
-import { FIXTURE_LISTINGS } from '../src/fixtures.js';
+import { FIXTURE_LISTINGS, FIXTURE_OFFERS } from '../src/fixtures.js';
 import type { MarketplaceBackend } from '../src/backend.js';
 import { chromium } from 'playwright';
 import { BrowserSessionManager } from '../src/browser.js';
 import { ProviderError } from '../src/index.js';
 import { facebookCredentialsFromEnv } from '../src/facebook-login.js';
-import { createMarketplaceService, type MarketplaceService, parseBackendKind, parseBackendTimeout, parseLoginWaitMs, parseMessengerEnabled } from '../src/service.js';
+import { createMarketplaceService, type MarketplaceService, parseBackendKind, parseBackendTimeout, parseLoginWaitMs, parseMessengerEnabled, parseShoppingBackendKind } from '../src/service.js';
 import * as packageEntry from '../src/index.js';
 import { runBackendOperation } from '../src/tools.js';
 import { threadsListInputSchema, threadReadInputSchema } from '../src/domain.js';
@@ -302,12 +302,14 @@ describe('fixture MCP service', () => {
     expect(client.getServerVersion()).toEqual({ name: 'marketplace', version: '0.1.0' });
     const tools = await client.listTools();
     expect(tools.tools.map(({ name }) => name)).toEqual([
-      'marketplace_search', 'marketplace_fetch', 'marketplace_status', 'messenger_threads_list', 'messenger_thread_read'
+      'marketplace_search', 'marketplace_fetch', 'marketplace_status', 'shopping_search', 'shopping_fetch', 'messenger_threads_list', 'messenger_thread_read'
     ]);
     expect(tools.tools.map(({ description }) => description)).toEqual([
       'Search marketplace listings.',
       'Fetch one marketplace listing by ID or canonical URL. Does not fetch remote URLs.',
       'Report service and schema versions, the configured backend name, and the Facebook session state.',
+      'Search one configured shopping source for products with prices, availability, and provenance. Read-only.',
+      'Fetch one product offer by canonical ID or URL from the configured shopping source. Read-only.',
       'List recent seller conversation threads from the Facebook Marketplace inbox. Read-only.',
       'Read the messages of one marketplace conversation thread by ID. Read-only, but opening the thread marks it "Seen" for the other participant.'
     ]);
@@ -356,6 +358,14 @@ describe('fixture MCP service', () => {
       ok: false,
       error: { code: 'NOT_FOUND', message: 'No conversation thread matched the supplied identifier.' }
     });
+    const shopping = structured(await client.callTool({ name: 'shopping_search', arguments: { query: 'solar' } }));
+    expect(shopping.backend).toBe('fixture');
+    expect(shopping.offers.map((offer: { id: string }) => offer.id)).toEqual(['synth-solar-001', 'synth-panel-004']);
+    expect(structured(await client.callTool({ name: 'shopping_fetch', arguments: { id: 'synth-meter-003' } })).offer)
+      .toEqual(FIXTURE_OFFERS[2]);
+    expect(structured(await client.callTool({ name: 'shopping_fetch', arguments: { url: 'https://www.example.com/ebay/item/synth-battery-002#details' } })).offer)
+      .toEqual(FIXTURE_OFFERS[1]);
+    expect(structured(await client.callTool({ name: 'marketplace_status', arguments: {} })).shopping_backend).toBe('fixture');
     expect(z.toJSONSchema(z.object({ value: z.string() })).type).toBe('object');
   });
 
@@ -485,6 +495,16 @@ describe('fixture MCP service', () => {
     expect(() => parseBackendKind('other')).toThrow(new RangeError('MARKETPLACE_BACKEND must be either "fixture" or "facebook"'));
   });
 
+  it('parses shopping backend selection and requires eBay credentials only when selected', () => {
+    expect(parseShoppingBackendKind(undefined)).toBe('fixture');
+    expect(parseShoppingBackendKind('ebay')).toBe('ebay');
+    expect(() => parseShoppingBackendKind('other')).toThrow(RangeError);
+    vi.stubEnv('SHOPPING_BACKEND', 'ebay');
+    vi.stubEnv('EBAY_CLIENT_ID', '');
+    vi.stubEnv('EBAY_CLIENT_SECRET', '');
+    expect(() => createMarketplaceService()).toThrow(/EBAY_CLIENT_ID/);
+  });
+
   it('enables Messenger only for MARKETPLACE_MESSENGER=1', () => {
     expect(parseMessengerEnabled(undefined)).toBe(false);
     expect(parseMessengerEnabled('1')).toBe(true);
@@ -507,7 +527,8 @@ describe('fixture MCP service', () => {
       service_version: '0.1.0',
       schema_version: '1.1.0',
       backend: 'status-only',
-      facebook_session: { status: 'session_unknown' }
+      facebook_session: { status: 'session_unknown' },
+      shopping_backend: 'fixture'
     });
     expect(service.browser.getInfo().browserStarted).toBe(false);
     expect(backend.search).not.toHaveBeenCalled();
@@ -681,7 +702,13 @@ describe('fixture MCP service', () => {
       ['messenger_thread_read', { thread_id: 'bad/id' }],
       ['messenger_thread_read', { thread_id: 'éclair' }],
       ['messenger_thread_read', { thread_id: 'x'.repeat(129) }],
-      ['messenger_thread_read', { thread_id: 't-synth-0001', extra: true }]
+      ['messenger_thread_read', { thread_id: 't-synth-0001', extra: true }],
+      ['shopping_search', undefined],
+      ['shopping_search', { query: 'solar', min_price: 5, max_price: 4 }],
+      ['shopping_search', { query: 'solar', unexpected: true }],
+      ['shopping_fetch', {}],
+      ['shopping_fetch', { id: 'bad/id' }],
+      ['shopping_fetch', { url: 'javascript:alert(1)' }]
     ];
     for (const [name, argumentsValue] of invalidArguments) {
       let response: { status: number; body: any };

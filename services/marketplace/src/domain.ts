@@ -79,6 +79,56 @@ export type ConversationThread = z.infer<typeof conversationThreadSchema>;
 export type ConversationMessage = z.infer<typeof conversationMessageSchema>;
 export type ConversationThreadMessages = { thread_id: string; messages: ConversationMessage[] };
 
+// Cross-site shopping contract (#48). `productOffer` is a sibling of `listing`, not a
+// replacement: Facebook tools keep the deployed `listing` contract, and a later comparison
+// layer unions the two. Facts only — deal scoring stays consumer-side.
+export const productConditionSchema = z.enum(['new', 'used', 'refurbished', 'unknown']);
+export const productAvailabilitySchema = z.enum(['in_stock', 'out_of_stock', 'preorder', 'unknown']);
+const currencyCodeSchema = z.string().regex(/^[A-Z]{3}$/, 'Must be an ISO 4217 currency code');
+
+export const productOfferSchema = z.object({
+  provider: z.literal('ebay'),
+  id: listingIdSchema,
+  product_id: listingIdSchema.nullable(),
+  url: httpUrlSchema,
+  title: z.string().min(1).max(256),
+  price: z.number().finite().nonnegative().nullable(),
+  currency: currencyCodeSchema,
+  condition: productConditionSchema,
+  availability: productAvailabilitySchema,
+  shipping_cost: z.number().finite().nonnegative().nullable(),
+  shipping_currency: currencyCodeSchema.nullable(),
+  location: z.string().max(MAX_LOCATION_LENGTH).nullable(),
+  seller: sellerSchema.nullable(),
+  posted_at: isoDateTimeSchema.nullable(),
+  updated_at: isoDateTimeSchema.nullable(),
+  images: z.array(httpUrlSchema).max(6),
+  state: z.enum(['active', 'sold', 'pending', 'removed', 'unknown'])
+}).strict();
+
+export type ProductOffer = z.infer<typeof productOfferSchema>;
+
+export const shoppingSearchInputSchema = z.object({
+  query: z.string().trim().min(1).max(MAX_QUERY_LENGTH).regex(/\S/),
+  min_price: z.number().finite().nonnegative().optional(),
+  max_price: z.number().finite().nonnegative().optional(),
+  limit: z.number().int().min(1).max(20).default(10)
+}).strict().refine((input) => {
+  return input.min_price === undefined || input.max_price === undefined || input.min_price <= input.max_price;
+}, { message: 'min_price must be less than or equal to max_price', path: ['max_price'] });
+
+export const shoppingFetchInputSchema = z.object({
+  // A legacy item id, or eBay's RESTful item id (v1|legacy|variation) exactly as Browse
+  // search returns it — the only form that addresses a specific variation.
+  id: z.string().min(1).max(MAX_LISTING_ID_LENGTH).regex(/^(?:v1\|[A-Za-z0-9][A-Za-z0-9._-]{0,60}\|[A-Za-z0-9][A-Za-z0-9._-]{0,60}|[A-Za-z0-9][A-Za-z0-9._-]*)$/).optional(),
+  url: httpUrlSchema.optional()
+}).strict().refine((input) => Number(input.id !== undefined) + Number(input.url !== undefined) === 1, {
+  message: 'Provide exactly one of id or url'
+});
+
+export type ShoppingSearchInput = z.infer<typeof shoppingSearchInputSchema>;
+export type ShoppingFetchInput = z.infer<typeof shoppingFetchInputSchema>;
+
 export const searchInputSchema = z.object({
   query: z.string().trim().min(1).max(MAX_QUERY_LENGTH).regex(/\S/),
   location: z.string().trim().min(1).max(MAX_LOCATION_LENGTH).regex(/\S/),
@@ -161,11 +211,27 @@ export const statusSuccessSchema = z.object({
   service_version: z.literal(SERVICE_VERSION),
   schema_version: z.literal(SCHEMA_VERSION),
   backend: backendNameSchema,
-  facebook_session: facebookSessionSchema.optional()
+  facebook_session: facebookSessionSchema.optional(),
+  shopping_backend: backendNameSchema.optional()
 }).strict();
 
 export const searchOutputSchema = z.union([searchSuccessSchema, runtimeFailureSchema]);
 export const fetchOutputSchema = z.union([fetchSuccessSchema, runtimeFailureSchema]);
+
+export const shoppingSearchSuccessSchema = z.object({
+  ok: z.literal(true),
+  backend: backendNameSchema,
+  offers: z.array(productOfferSchema).max(20)
+}).strict();
+
+export const shoppingFetchSuccessSchema = z.object({
+  ok: z.literal(true),
+  backend: backendNameSchema,
+  offer: productOfferSchema
+}).strict();
+
+export const shoppingSearchOutputSchema = z.union([shoppingSearchSuccessSchema, runtimeFailureSchema]);
+export const shoppingFetchOutputSchema = z.union([shoppingFetchSuccessSchema, runtimeFailureSchema]);
 export const statusOutputSchema = statusSuccessSchema;
 export const threadsListOutputSchema = z.union([
   z.object({

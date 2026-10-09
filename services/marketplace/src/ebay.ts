@@ -1,0 +1,159 @@
+export interface EbayClientOptions {
+  clientId: string;
+  clientSecret: string;
+  baseUrl?: string;
+  fetchImpl?: typeof fetch;
+}
+
+export interface EbaySearchOptions {
+  limit: number;
+  minPrice?: number;
+  maxPrice?: number;
+}
+
+export class EbayHttpError extends Error {
+  constructor(readonly status: number, readonly retryAfter?: number) {
+    super(`eBay API returned HTTP ${status}`);
+    this.name = 'EbayHttpError';
+  }
+}
+
+interface TokenResponse {
+  access_token?: unknown;
+  expires_in?: unknown;
+}
+
+export class EbayClient {
+  private readonly baseUrl: string;
+  private readonly fetchImpl: typeof fetch;
+  private token: string | undefined;
+  private tokenExpiresAt = 0;
+  private tokenRequest: Promise<string> | undefined;
+
+  constructor(options: EbayClientOptions) {
+    if (!options || typeof options !== 'object') throw new TypeError('options must be an object');
+    if (typeof options.clientId !== 'string' || !options.clientId.trim()) throw new TypeError('clientId must not be empty');
+    if (typeof options.clientSecret !== 'string' || !options.clientSecret.trim()) throw new TypeError('clientSecret must not be empty');
+    const base = options.baseUrl ?? 'https://api.ebay.com';
+    // Credential destination restriction: the token POST carries Basic-encoded application
+    // credentials, so the client must not be pointable at arbitrary origins. Runtime targets
+    // are eBay's production and sandbox hosts over HTTPS only; loopback HTTP exists solely
+    // as an explicit test seam. There is deliberately no environment variable that can move
+    // this destination (see review of #61: EBAY_BASE_URL was removed for exactly that reason).
+    let parsed: URL;
+    try { parsed = new URL(base); } catch { throw new TypeError('baseUrl must be a valid URL'); }
+    const host = parsed.hostname.toLowerCase();
+    const isLoopback = ['127.0.0.1', '::1', 'localhost'].includes(host);
+    const isEbayHost = parsed.protocol === 'https:' && ['api.ebay.com', 'api.sandbox.ebay.com'].includes(host);
+    if (parsed.username || parsed.password || parsed.search || parsed.hash || (!isEbayHost && !(isLoopback && ['http:', 'https:'].includes(parsed.protocol)))) {
+      throw new TypeError('baseUrl must be https://api.ebay.com, https://api.sandbox.ebay.com, or a loopback test address');
+    }
+    this.baseUrl = base.replace(/\/$/, '');
+    this.fetchImpl = options.fetchImpl ?? fetch;
+    this.clientId = options.clientId;
+    this.clientSecret = options.clientSecret;
+  }
+
+  private readonly clientId: string;
+  private readonly clientSecret: string;
+
+  async searchItems(query: string, options: EbaySearchOptions, signal?: AbortSignal): Promise<unknown> {
+    const params = new URLSearchParams({ q: query, limit: String(options.limit) });
+    if (options.minPrice !== undefined || options.maxPrice !== undefined) {
+      // Browse accepts price constraints as one filter expression; currency is pinned to USD.
+      // The marketplace id header is likewise pinned (EBAY_US): single-locale is a documented
+      // v1 gap (docs/shopping-provider-research.md). Thread a marketplace option through here
+      // before adding any other locale, including the currency fallback in mapOffer.
+      params.set('filter', `price:[${options.minPrice ?? ''}..${options.maxPrice ?? ''}],priceCurrency:USD`);
+    }
+    return this.apiRequest(`/buy/browse/v1/item_summary/search?${params}`, signal);
+  }
+
+  async getItemByRestfulId(id: string, signal?: AbortSignal): Promise<unknown> {
+    // Browse requires the RESTful item ID (v1|legacy|variation) passed through unchanged,
+    // URL-encoded; it selects the exact variation. Legacy lookups cannot address variations.
+    return this.apiRequest(`/buy/browse/v1/item/${encodeURIComponent(id)}`, signal);
+  }
+
+  async getItemByLegacyId(id: string, signal?: AbortSignal): Promise<unknown> {
+    const params = new URLSearchParams({ legacy_item_id: id });
+    return this.apiRequest(`/buy/browse/v1/item/get_item_by_legacy_id?${params}`, signal);
+  }
+
+  private async apiRequest(path: string, signal?: AbortSignal): Promise<unknown> {
+    let token = await this.getToken(signal);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
+        headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'X-EBAY-C-MARKETPLACE-ID': 'EBAY_US' }, signal
+      });
+      if (response.status === 401 && attempt === 0) {
+        token = await this.getToken(signal, true);
+        continue;
+      }
+      if (!response.ok) throw await responseError(response);
+      return response.json();
+    }
+    throw new EbayHttpError(401);
+  }
+
+  private async getToken(signal?: AbortSignal, force = false): Promise<string> {
+    // A forced refresh (after a 401) invalidates the cached token and then joins any
+    // in-flight refresh rather than starting a second one: simultaneous 401s share a single
+    // fetch. The shared refresh is deliberately NOT bound to the first caller's signal —
+    // cancelling one request must not fail unrelated waiters — so each caller races its own
+    // signal against the shared promise below.
+    if (force) { this.token = undefined; this.tokenExpiresAt = 0; }
+    if (this.token && Date.now() < this.tokenExpiresAt) return this.token;
+    if (!this.tokenRequest) {
+      let request: Promise<string> | undefined;
+      request = (async () => {
+        try {
+          const response = await this.fetchImpl(`${this.baseUrl}/identity/v2/oauth2/token`, {
+            method: 'POST',
+            headers: {
+              Authorization: `Basic ${Buffer.from(`${this.clientId}:${this.clientSecret}`).toString('base64')}`,
+              'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json'
+            },
+            body: 'grant_type=client_credentials&scope=https%3A%2F%2Fapi.ebay.com%2Foauth%2Fapi_scope'
+          });
+          if (!response.ok) throw await responseError(response);
+          const payload = await response.json() as TokenResponse;
+          if (typeof payload.access_token !== 'string' || !payload.access_token || typeof payload.expires_in !== 'number' || !Number.isFinite(payload.expires_in)) {
+            throw new Error('Invalid eBay OAuth token response');
+          }
+          this.token = payload.access_token;
+          this.tokenExpiresAt = Date.now() + Math.max(0, payload.expires_in - 60) * 1000;
+          return this.token;
+        } finally {
+          if (this.tokenRequest === request) this.tokenRequest = undefined;
+        }
+      })();
+      this.tokenRequest = request;
+    }
+    return raceWithAbort(this.tokenRequest, signal);  }
+}
+
+// Await a shared promise but reject on the caller's own abort, without cancelling the shared
+// work for other waiters.
+function raceWithAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise;
+  return new Promise<T>((resolve, reject) => {
+    if (signal.aborted) {
+      promise.catch(() => {}); // nobody else may be attached yet; keep the rejection observed
+      reject(signal.reason ?? new Error('aborted'));
+      return;
+    }
+    const onAbort = () => reject(signal.reason ?? new Error('aborted'));
+    signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(
+      (value) => { signal.removeEventListener('abort', onAbort); resolve(value); },
+      (error) => { signal.removeEventListener('abort', onAbort); reject(error); }
+    );
+  });
+}
+
+async function responseError(response: Response): Promise<EbayHttpError> {  // A missing header means "no hint" — Number(null) is 0, which would read as "retry now".
+  const header = response.headers.get('retry-after');
+  const value = header === null ? NaN : Number(header);
+  return new EbayHttpError(response.status, Number.isFinite(value) && value >= 0 ? value : undefined);
+}

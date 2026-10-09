@@ -1,4 +1,6 @@
-import type { ConversationMessage, ConversationThread, Listing } from './domain.js';
+import { shoppingFetchInputSchema, shoppingSearchInputSchema, productOfferSchema, type ConversationMessage, type ConversationThread, type Listing, type ProductOffer } from './domain.js';
+import type { ShoppingBackend } from './backend.js';
+import { canonicalHttpUrl } from './backend.js';
 
 export const FIXTURE_CONVERSATIONS: readonly {
   thread: ConversationThread;
@@ -41,6 +43,68 @@ export const FIXTURE_CONVERSATIONS: readonly {
     ]
   }
 ];
+
+export const FIXTURE_OFFERS: readonly ProductOffer[] = [
+  {
+    provider: 'ebay', id: 'synth-solar-001', product_id: null,
+    url: 'https://www.example.com/ebay/item/synth-solar-001', title: 'SYNTHETIC 100W solar panel demo offer',
+    price: 42, currency: 'USD', condition: 'new', availability: 'in_stock', shipping_cost: 8, shipping_currency: 'USD',
+    location: 'Synthetic warehouse', seller: { id: 'seller-synth-1', name: 'Synthetic Seller' },
+    posted_at: '2025-01-01T00:00:00.000Z', updated_at: null, images: [], state: 'active'
+  },
+  {
+    provider: 'ebay', id: 'synth-battery-002', product_id: 'product-synth-2',
+    url: 'https://www.example.com/ebay/item/synth-battery-002', title: 'SYNTHETIC 12V battery sample',
+    price: 19, currency: 'USD', condition: 'used', availability: 'in_stock', shipping_cost: null, shipping_currency: null,
+    location: null, seller: null, posted_at: null, updated_at: null, images: [], state: 'active'
+  },
+  {
+    provider: 'ebay', id: 'synth-meter-003', product_id: null,
+    url: 'https://www.example.com/ebay/item/synth-meter-003', title: 'SYNTHETIC digital multimeter example',
+    price: 0, currency: 'USD', condition: 'refurbished', availability: 'unknown', shipping_cost: 0, shipping_currency: 'USD',
+    location: 'Example location', seller: { name: 'Demo Seller' },
+    posted_at: null, updated_at: null, images: [], state: 'unknown'
+  },
+  {
+    provider: 'ebay', id: 'synth-panel-004', product_id: null,
+    url: 'https://www.example.com/ebay/item/synth-panel-004', title: 'SYNTHETIC compact solar panel',
+    price: null, currency: 'USD', condition: 'unknown', availability: 'out_of_stock', shipping_cost: null, shipping_currency: null,
+    location: null, seller: null, posted_at: null, updated_at: null, images: [], state: 'sold'
+  },
+  {
+    provider: 'ebay', id: 'synth-battery-005', product_id: 'product-synth-5',
+    url: 'https://www.example.com/ebay/item/synth-battery-005', title: 'SYNTHETIC rechargeable battery pack',
+    price: 73, currency: 'USD', condition: 'new', availability: 'preorder', shipping_cost: 4, shipping_currency: 'USD',
+    location: 'Demo depot', seller: { name: 'Sample Store' },
+    posted_at: null, updated_at: null, images: [], state: 'pending'
+  },
+  {
+    provider: 'ebay', id: 'synth-meter-006', product_id: null,
+    url: 'https://www.example.com/ebay/item/synth-meter-006', title: 'SYNTHETIC multimeter calibration unit',
+    price: 28, currency: 'USD', condition: 'used', availability: 'in_stock', shipping_cost: 2, shipping_currency: 'USD',
+    location: null, seller: null, posted_at: null, updated_at: null, images: [], state: 'active'
+  }
+].map((offer) => productOfferSchema.parse(offer));
+
+export class FixtureShoppingBackend implements ShoppingBackend {
+  readonly name = 'fixture';
+
+  search(input: ReturnType<typeof shoppingSearchInputSchema.parse>, _signal: AbortSignal): ProductOffer[] {
+    const query = input.query.toLowerCase();
+    return FIXTURE_OFFERS.filter((offer) => {
+      const matchesText = offer.title.toLowerCase().includes(query);
+      const matchesMin = input.min_price === undefined || (offer.price !== null && offer.price >= input.min_price);
+      const matchesMax = input.max_price === undefined || (offer.price !== null && offer.price <= input.max_price);
+      return matchesText && matchesMin && matchesMax;
+    }).slice(0, input.limit);
+  }
+
+  fetch(input: ReturnType<typeof shoppingFetchInputSchema.parse>, _signal: AbortSignal): ProductOffer | null {
+    if (input.id !== undefined) return FIXTURE_OFFERS.find((offer) => offer.id === input.id) ?? null;
+    const target = canonicalHttpUrl(input.url!);
+    return FIXTURE_OFFERS.find((offer) => canonicalHttpUrl(offer.url) === target) ?? null;
+  }
+}
 
 export const FIXTURE_LISTINGS: readonly Listing[] = [
   {
