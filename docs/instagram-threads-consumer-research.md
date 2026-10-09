@@ -6,7 +6,7 @@ Parent: #38 (verticals). Issue: #46. Status: research complete, integration deci
 
 Issue #46 asks for saved content, DMs, and consumer social actions on Instagram and Threads, for the operator's normal **personal consumer accounts**. The requested outcome is three things before any implementation: (1) a capability matrix and integration decision, (2) one high-value read-only proof defined, and (3) write scopes and approval behaviour made explicit before any write exists.
 
-Instagram media **queuing already exists** in the operator's OpenClaw workflow. This research therefore does not propose replicating any media-publishing/queuing workflow; authoring is assessed for feasibility only. The scoped surfaces are saved items, search/read, conversations/DMs, and authoring feasibility.
+Instagram media **queuing already exists** in the operator's OpenClaw workflow (per issue #46's own framing). This research therefore does not propose replicating any media-publishing/queuing workflow; authoring is assessed for feasibility only. The scoped surfaces are saved items, search/read, conversations/DMs, and authoring feasibility.
 
 Everything here is analysed against personal (non-Business, non-Creator) accounts. Where a capability exists only for professional accounts, that is recorded as a boundary, not worked around.
 
@@ -22,7 +22,7 @@ Access-bar ratings are about solo-operator friction, not money. "Access bar" is 
 | Instagram — authoring | Graph API content publishing (professional only) | ★★★ professional | n/a | exists (100 API-published posts/24h) but out of scope | **No-go for personal; do not replicate queuing** |
 | Threads — saved items/collections | none | — | no endpoint exists | n/a | **No-go** |
 | Threads — search/read (own posts, replies, conversation, mentions) | official Threads API (`threads_basic` + `threads_read_replies`, optionally `threads_manage_mentions`) | ★ low: Meta app with Threads Use Case + user OAuth; testers need no App Review | own posts, own replies, public reply trees, own mentions | n/a | **Go (read-only)** |
-| Threads — search/read (keyword search, external profile discovery) | official Threads API (`threads_keyword_search`, `threads_profile_discovery`) | ★★ advanced access / App Review | yes, but gated and rate-limited | n/a | **Follow-up, not in proof** |
+| Threads — search/read (keyword search, external profile discovery) | official Threads API (advanced-access search/discovery scopes; exact scope names **UNVERIFIED**) | ★★ advanced access / App Review | documented as available but gated and rate-limited; gating to confirm | n/a | **Follow-up, not in proof** |
 | Threads — conversations/DMs | none | — | no DM endpoint; "conversation" is a public reply tree only | n/a | **No-go** |
 | Threads — authoring (posts/replies) | official Threads API (`threads_content_publish`, `threads_manage_replies`) | ★ low technically, but write-class | n/a | yes (250 posts/24h, 1000 replies/24h) | **Out of scope; write-gated** |
 
@@ -31,7 +31,7 @@ Access-bar ratings are about solo-operator friction, not money. "Access bar" is 
 The decision turns on one asymmetry: **Instagram's sanctioned API is professional-only, Threads' is not.**
 
 - On Instagram, the only sanctioned API reads and writes **Instagram PROFESSIONAL (Business/Creator) accounts**. The Facebook-Login variant explicitly cannot access consumer accounts. There is no sanctioned API for a personal account's Saved tab or personal DMs. The only sanctioned route to a personal account's own data is the manual, delayed, point-in-time export.
-- On Threads, the standard API is available to personal profiles. Since 2025-09-23 profiles without a linked Instagram account are supported except `followers_count`/`follower_demographics`; no business/creator requirement is stated for the standard API. Getting started needs only a Meta app using the "Threads Use Case" plus user OAuth consent.
+- On Threads, the standard API is available to personal profiles. Since 2025-09-23 profiles without a linked Instagram account are supported (a metric carve-out reported at that time was later relaxed — confirm the current state); no business/creator requirement is stated for the standard API. Getting started needs only a Meta app using the "Threads Use Case" plus user OAuth consent.
 - **Neither provider exposes saved posts.** Instagram has no API for user saved posts/collections; `IG Media.saved_count` is a count of saves *of your own media* (owner-only), **not** the user's Saved tab — a common ambiguity trap. Threads' full endpoint enumeration has no saved/bookmarks resource.
 - **Neither provider exposes personal DMs through a sanctioned connector.** Instagram Messaging serves the professional inbox only. Threads has no direct-message endpoints at all; its "conversation" endpoint is the public reply tree.
 - **Browser fallback is prohibited.** Meta, Instagram, and Threads terms each ban automated collection; the Instagram and Meta terms state the ban applies "regardless of whether such automated access or collection is undertaken while logged-in," so a logged-in browser/Playwright session does not escape it.
@@ -55,7 +55,7 @@ Researched against official developer documentation and primary terms as of Octo
 | Path | Verdict | Basis |
 |---|---|---|
 | Official Threads API | **Selected** | Standard read of own posts/replies; no business requirement stated; OAuth consent, no browser, no ToS exposure. |
-| Keyword search / external profile discovery | **Deferred** | Requires `threads_keyword_search` / `threads_profile_discovery` advanced access or App Review; public-profile discovery is limited to profiles with ≥100 followers and standard access only covers @meta/@threads/@instagram/@facebook. |
+| Keyword search / external profile discovery | **Deferred** | Requires advanced-access search/discovery scopes or App Review (exact scope names `UNVERIFIED`); the follower-threshold and standard-access limitations reported during research are `ASSUMED`, not confirmed. |
 | Saved posts | **Does not exist** | No endpoint. |
 | DMs | **Does not exist** | No direct-message endpoints. |
 | Official data export | **Manual, delayed** | Threads has its own export page (page exists; body not renderable during research), same point-in-time limits as Instagram. |
@@ -73,7 +73,7 @@ Third-party connectors are evaluated under "Third-party connectors and official 
 **Read the operator's own Threads posts and their reply/conversation threads via the official Threads API.**
 
 - Smallest defensible scope: `threads_basic` (required) plus `threads_read_replies`. Optionally include own mentions via `threads_manage_mentions`. Read own posts with `GET /{threads-user-id}/threads`, own replies with `GET /{threads-user-id}/replies`, reply/conversation trees with `GET /{media-id}/replies` and `GET /{media-id}/conversation`, and (if included) mentions with `GET /{threads-user-id}/mentions`. The proof will live under a Threads scope `(threads, default, social)`, risk class `read`.
-- **Do not include** keyword search or external profile discovery in the proof — they require advanced access / App Review. Name them as documented follow-ups.
+- **Do not include** keyword search or external profile discovery in the proof — they require advanced access / App Review. Name them as documented follow-ups. Other documented scopes (`threads_manage_insights`, `threads_delete`, `threads_location_tagging`, `threads_share_to_instagram`) exist but are out of scope for a read-only proof.
 - **Fixture-first bar.** The connector is built against recorded fixture HTTP responses first; live calls happen only with the operator's OAuth token in the environment. Missing token fails closed with a typed `ProviderError` while the tool stays listed and documented. This proves the "inspect social content" capability for a personal account with zero browser automation and zero ToS exposure.
 - Provider-visible side effects: reading a Threads reply tree is a public read of already-public content and is not expected to signal the author, but a provider-visible read side effect analogous to Messenger "Seen"/presence is `ASSUMED` for Instagram and must be declared if such a tool ever ships.
 
@@ -120,14 +120,14 @@ Threads publishing constraints: text ≤ 500 chars; image ≤ 8 MB JPEG/PNG; vid
 
 - Instagram Platform API enumerates only IG Comment, IG Container, IG Hashtag, IG Media, IG User, Page, and edge `ig_hashtag_search`; no saved-posts node.
 - `IG Media.saved_count` is saves of your own media, not the user's Saved tab.
-- Basic Display deprecation dates (announced 2024-09-04; error from 2024-12-04) and its former personal/private read capability.
+- Basic Display deprecation dates (announced 2024-09-04; error from 2024-12-04) and its former personal/private read capability (confirmed via an archived capture; the original doc page now returns 404).
 - Graph API / IG Login / FB Login require a professional account; FB Login cannot access consumer accounts.
 - Instagram Messaging permissions and the 24h / Human Agent 7-day windows.
 - Instagram Standard vs Advanced Access, App Review + Business Verification, token lifetimes, 90-day unused-permission regrant, rate limits, publishing limit, hashtag limit, error codes.
 - Threads API opened to all developers 2024-06-18; no-linked-Instagram profiles supported since 2025-09-23; standard scope list; threads business scope prohibited in consumer apps.
 - Threads read endpoints, publishing capabilities and limits, no saved endpoint, no DM endpoint, "conversation" = public reply tree, Share to Instagram Stories is an IG Story not a DM.
 - Threads rate limits, token lifetimes, quota introspection endpoint, `THREADS_API__LINK_LIMIT_EXCEEDED`.
-- Meta ToS §3.2(3), Instagram Terms §4.2, Threads Terms §3(a)(iv) automated-collection bans, including the logged-in qualifier.
+- Meta ToS §3.2(3), Instagram Terms §4.2, Threads Terms §3(a)(iv) automated-collection bans, including the logged-in qualifier (operative wording verified; exact section numbering unverified).
 - Export page existence and options for Instagram; Threads export page exists.
 - Composio Instagram toolkit is the official API requiring Business/Creator, not browser automation.
 
@@ -139,6 +139,9 @@ Threads publishing constraints: text ≤ 500 chars; image ≤ 8 MB JPEG/PNG; vid
 4. Instagram read side effects analogous to Messenger "Seen"/presence — `ASSUMED`, declare if a tool ships.
 5. Exact Threads endpoint paths and response field spellings — to be confirmed against the official reference when the client is written.
 6. Whether the operator's own Threads account has a linked Instagram account and therefore which optional scopes behave as documented.
+7. Exact advanced-access scope names for Threads keyword search / profile discovery (`threads_keyword_search`, `threads_profile_discovery`) and their gating — `ASSUMED`; these were not confirmable in the Get Started permission table and must be checked against the current permissions reference before any such tool is scoped.
+8. The current status of the no-linked-Instagram metric carve-out for Threads — `ASSUMED`; the 2025-09-23 carve-out was reported relaxed later, so confirm the live state.
+9. Exact section numbering of the Meta / Instagram / Threads terms clauses — `ASSUMED`; the operative automated-collection wording is verified, the numbering is not.
 
 ## Safety, privacy, and boundaries
 
@@ -170,25 +173,27 @@ Cross-links: [`provider-action-boundaries.md`](provider-action-boundaries.md) (n
 
 Meta developer documentation:
 
-1. Instagram Platform API reference — https://developers.facebook.com/docs/instagram-platform
+1. Instagram Platform API reference — https://developers.facebook.com/documentation/instagram-platform
 2. Instagram API with Instagram Login — https://developers.facebook.com/docs/instagram-platform/instagram-api-with-instagram-login
-3. Instagram API with Facebook Login — https://developers.facebook.com/docs/instagram-platform/instagram-api-with-facebook-login
-4. Instagram Basic Display API (deprecation) — https://developers.facebook.com/docs/instagram-basic-display-api
+3. Instagram API with Facebook Login — https://developers.facebook.com/documentation/instagram-platform/instagram-api-with-facebook-login
+4. Instagram Basic Display API (deprecation) — https://developers.facebook.com/documentation/instagram-basic-display-api (page now retired/404; archived capture relied on)
 5. Instagram Messaging API — https://developers.facebook.com/docs/instagram-platform/instagram-api-with-instagram-login/messaging-api
 6. Threads API — https://developers.facebook.com/docs/threads
 7. Threads API get started — https://developers.facebook.com/docs/threads/get-started
 8. Threads posts (publishing) — https://developers.facebook.com/docs/threads/posts
-9. Threads keyword search — https://developers.facebook.com/docs/threads/keyword-search
-10. Threads profile posts / lookup — https://developers.facebook.com/docs/threads/profile-lookup
+9. Threads keyword search — https://developers.facebook.com/documentation/threads/keyword-search
+10. Threads profile posts / lookup — https://developers.facebook.com/documentation/threads/threads-profiles
+11. Threads permissions reference — https://developers.facebook.com/docs/permissions
+12. Threads changelog — https://developers.facebook.com/documentation/threads/changelog
 
 Terms and export:
 
-11. Meta Terms of Service §3.2(3), eff. 2025-01-01 — https://www.facebook.com/legal/terms (archived capture relied on; live terms page blocked fetch)
-12. Instagram Terms of Use §4.2 — https://help.instagram.com/581066165581870 (archived capture relied on)
-13. Threads Terms of Use §3(a)(iv) — https://help.instagram.com/769983657850450 (archived capture relied on)
-14. Accounts Center — Export your information — https://accountscenter.instagram.com/ (export option labels confirmed on the Accounts Center help surface; Instagram saved-items inclusion `ASSUMED`)
+13. Meta Terms of Service §3.2(3), eff. 2025-01-01 — https://www.facebook.com/legal/terms (archived capture relied on; live terms page blocked fetch)
+14. Instagram Terms of Use §4.2 — https://help.instagram.com/581066165581870 (archived capture relied on)
+15. Threads Terms of Use §3(a)(iv) — https://help.instagram.com/769983657850450 (archived capture relied on)
+16. Accounts Center — Export your information — https://accountscenter.instagram.com/ (export option labels confirmed on the Accounts Center help surface; Instagram saved-items inclusion `ASSUMED`)
 
 Connectors and community:
 
-15. Composio Instagram toolkit docs — https://docs.composio.dev/toolkits/instagram (official API with Business Login; professional accounts only)
-16. instagrapi best-practices — https://github.com/subzeroid/instagrapi (community evidence for personal-account automation risk; `ASSUMED`, no primary Meta statistic)
+17. Composio Instagram toolkit docs — https://docs.composio.dev/toolkits/instagram (official API with Business Login; professional accounts only)
+18. instagrapi best-practices — https://github.com/subzeroid/instagrapi (community evidence for personal-account automation risk; `ASSUMED`, no primary Meta statistic)
