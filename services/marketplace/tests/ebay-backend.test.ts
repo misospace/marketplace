@@ -26,6 +26,7 @@ beforeAll(async () => {
         ? { itemSummaries: [{ itemId: 'invalid', title: 'No URL' }, { itemId: 'v1|123|1', itemWebUrl: 'https://www.ebay.com/itm/123', title: 'Synthetic Good Row' }] }
         : mode === 'coercion' ? coercionTrapPayload()
         : mode === 'variations' ? variationsPayload()
+        : mode === 'conditions' ? conditionsPayload()
         : mode === 'malformed' ? { total: 3, warnings: [] }
         : fixture('search-success.json')));
       return;
@@ -49,6 +50,19 @@ function variationsPayload() {
   return { itemSummaries: [
     { itemId: 'v1|555000|1', itemWebUrl: 'https://www.ebay.com/itm/555000', title: 'Synthetic Widget Variation One', price: { value: '10.00', currency: 'USD' }, condition: 'New' },
     { itemId: 'v1|555000|2', itemWebUrl: 'https://www.ebay.com/itm/555000', title: 'Synthetic Widget Variation Two', price: { value: '12.00', currency: 'USD' }, condition: 'New' }
+  ] };
+}
+
+function conditionsPayload() {
+  const row = (itemId: string, condition: string) => ({ itemId, itemWebUrl: `https://www.ebay.com/itm/${itemId.split('|')[1]}`, title: `Synthetic ${condition}`, price: { value: '5.00', currency: 'USD' }, condition });
+  return { itemSummaries: [
+    row('v1|6001|0', 'Brand New'),
+    row('v1|6002|0', 'Like New'),
+    row('v1|6003|0', 'Used - Like New'),
+    row('v1|6004|0', 'New other (see details)'),
+    row('v1|6005|0', 'Excellent - Refurbished'),
+    row('v1|6006|0', 'For parts or not working'),
+    row('v1|6007|0', 'Mystery Condition')
   ] };
 }
 
@@ -103,6 +117,19 @@ describe('EbayShoppingBackend', () => {
       id: 'v1|2001|0', price: null, currency: 'USD', condition: 'refurbished', shipping_cost: 0, shipping_currency: 'USD'
     });
     expect(offers[1]).toMatchObject({ id: 'v1|2003|0', shipping_cost: null, shipping_currency: null });
+  });
+  it('maps eBay condition labels precisely: Like New is used, ambiguous is unknown', async () => {
+    mode = 'conditions';
+    const offers = await backend().search(searchInput, signal());
+    expect(Object.fromEntries(offers.map((offer) => [offer.title, offer.condition]))).toEqual({
+      'Synthetic Brand New': 'new',
+      'Synthetic Like New': 'used',
+      'Synthetic Used - Like New': 'used',
+      'Synthetic New other (see details)': 'new',
+      'Synthetic Excellent - Refurbished': 'refurbished',
+      'Synthetic For parts or not working': 'unknown',
+      'Synthetic Mystery Condition': 'unknown'
+    });
   });
   it('rejects a search response with no itemSummaries and no zero total as schema drift', async () => {
     mode = 'malformed';

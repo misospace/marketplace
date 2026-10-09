@@ -149,13 +149,45 @@ function legacyIdFromUrl(value: string): string | null {
   } catch { return null; }
 }
 
+// eBay's condition vocabulary, mapped exactly (case-insensitive). Substring inference is
+// deliberately limited: "Like New" contains "new" but eBay defines it as an opened,
+// potentially used condition, so anything not recognized here or by the unambiguous family
+// fallbacks below maps to 'unknown' rather than guessed newness.
+const CONDITION_EXACT: Readonly<Record<string, ProductOffer['condition']>> = {
+  'new': 'new',
+  'brand new': 'new',
+  'new other (see details)': 'new',
+  'new with defects': 'new',
+  'new in box': 'new',
+  'new without box': 'new',
+  'like new': 'used',
+  'like_new': 'used',
+  'used - like new': 'used',
+  'certified refurbished': 'refurbished',
+  'excellent - refurbished': 'refurbished',
+  'very good - refurbished': 'refurbished',
+  'good - refurbished': 'refurbished',
+  'seller refurbished': 'refurbished',
+  'used': 'used',
+  'excellent - used': 'used',
+  'very good - used': 'used',
+  'good - used': 'used',
+  'acceptable - used': 'used',
+  'pre-owned': 'used',
+  'open box': 'used',
+  'for parts or not working': 'unknown'
+};
+
 function condition(value: unknown): ProductOffer['condition'] {
   if (typeof value !== 'string') return 'unknown';
+  const exact = CONDITION_EXACT[value.trim().toLowerCase()];
+  if (exact) return exact;
   const lower = value.toLowerCase();
-  // "Renewed" contains "new"; it must be classified as refurbished before the 'new' check.
-  if (lower.includes('refurb') || lower === 'renewed' || lower.includes('renewed')) return 'refurbished';
-  if (lower.includes('new')) return 'new';
+  // Only unambiguous families fall back to substring matching; 'new' is not one of them.
+  if (lower.includes('refurb') || lower.includes('renewed')) return 'refurbished';
+  if (lower.includes('like new')) return 'used';
   if (lower.includes('used') || lower.includes('pre-owned') || lower.includes('open box')) return 'used';
+  if (lower.startsWith('new other') || lower.startsWith('new with')) return 'new';
   return 'unknown';
 }
 

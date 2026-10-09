@@ -38,7 +38,6 @@ export interface ServiceOptions {
   backendKind?: 'fixture' | 'facebook';
   shoppingBackendKind?: 'fixture' | 'ebay';
   shopping?: ShoppingBackend;
-  ebayBaseUrl?: string;
   facebookMarkets?: readonly FacebookMarket[];
   host?: string;
   port?: number;
@@ -94,12 +93,10 @@ export function createMarketplaceService(options: ServiceOptions = {}): Marketpl
   if (options.shopping !== undefined && options.shoppingBackendKind !== undefined) {
     throw new TypeError('shopping and shoppingBackendKind cannot both select a backend');
   }
-  const ebayBaseUrl = options.ebayBaseUrl ?? process.env.EBAY_BASE_URL;
   const shopping = options.shopping ?? (shoppingBackendKind === 'ebay'
     ? new EbayShoppingBackend(new EbayClient({
       clientId: requiredEnv('EBAY_CLIENT_ID'),
-      clientSecret: requiredEnv('EBAY_CLIENT_SECRET'),
-      ...(ebayBaseUrl !== undefined ? { baseUrl: ebayBaseUrl } : {})
+      clientSecret: requiredEnv('EBAY_CLIENT_SECRET')
     }))
     : new FixtureShoppingBackend());
   const loginWaitMs = options.facebookLoginWaitMs ?? parseLoginWaitMs(process.env.FACEBOOK_LOGIN_WAIT_SECONDS);
