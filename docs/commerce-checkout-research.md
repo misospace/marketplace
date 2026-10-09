@@ -82,7 +82,7 @@ commerce_purchase: {
 }
 ```
 
-**Scope and backend seam.** Proposed scope: `(ebay, default, commerce)`, distinct from `(ebay, default, shopping)` so transaction permissions are separable (`tools.ts:36-38`). Follow the existing optional-backend injection pattern used for `shopping?` and `conversations?` (`tools.ts:99-109`, `tools.ts:236-237`; `service.ts:186-195`): add a `commerce?` seam that fails closed when unconfigured, with fixture backend as the default and credentials supplied only through the environment. This is a design proposal, not a claim that such a seam exists today. No provider endpoint or checkout API is assumed.
+**Scope and backend seam.** Proposed scope: `(ebay, default, commerce)`, distinct from `(ebay, default, shopping)` so transaction permissions are separable (`tools.ts:36-38`). Follow the existing optional-backend injection pattern used for `shopping?` and `conversations?` (`tools.ts:99-109`, `tools.ts:236-237`; shopping construction at `service.ts:96-101`, conversations at `service.ts:186-195`): add a `commerce?` seam that fails closed when unconfigured, with fixture backend as the default and credentials supplied only through the environment. This is a design proposal, not a claim that such a seam exists today. No provider endpoint or checkout API is assumed.
 
 ## Safe preview/dry-run path
 
@@ -97,7 +97,7 @@ commerce_purchase: {
 | eBay | Production Buy APIs are partner-gated by an Application Growth Check; a personal assistant is not an exemplar use case. | Existing repository research; official docs are auth-gated (`shopping-provider-research.md:37-46`). The docs' gate and exemplar details are reported by that research, not independently revalidated here. |
 | Best Buy | Developer API is product discovery only, not consumer checkout/charge. | Checked against official docs in the shopping-provider research; no checkout capability found. |
 | Amazon | Consumer APIs are affiliate-gated; PA-API v5 is deprecated and Creators API requires qualifying sales. | Checked against official docs/program pages in the shopping-provider research. |
-| Facebook Marketplace | No API; access is browser-only. | Repository research states no sanctioned consumer path; treated here as an assumed capability finding, not a live-site validation. |
+| Facebook Marketplace | No API; access is browser-only. | Assumed capability finding, not live-site validation. The marketplace and conversation research document browser-only access and no sanctioned consumer API (`shopping-provider-research.md`; `conversation-surface-research.md:14-21`). |
 
 ## What is verified vs assumed
 
