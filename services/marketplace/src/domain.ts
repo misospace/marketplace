@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { PROVIDER_SESSION_ASSESSMENTS } from './browser.js';
 
-export const SCHEMA_VERSION = '1.1.0';
+export const SCHEMA_VERSION = '1.2.0';
 export const SERVICE_VERSION = '0.1.0'; // x-release-please-version
 export const MAX_QUERY_LENGTH = 256;
 export const MAX_LOCATION_LENGTH = 256;
@@ -206,13 +206,20 @@ export const facebookSessionSchema = z.object({
   status: z.enum(PROVIDER_SESSION_ASSESSMENTS)
 }).strict();
 
+export const capabilitySchema = z.object({
+  surface: z.enum(['marketplace', 'shopping', 'messenger']),
+  provider: z.enum(['facebook', 'ebay']),
+  backend: backendNameSchema.nullable()
+}).strict();
+
 export const statusSuccessSchema = z.object({
   ok: z.literal(true),
   service_version: z.literal(SERVICE_VERSION),
   schema_version: z.literal(SCHEMA_VERSION),
   backend: backendNameSchema,
   facebook_session: facebookSessionSchema.optional(),
-  shopping_backend: backendNameSchema.optional()
+  shopping_backend: backendNameSchema.optional(),
+  capabilities: z.array(capabilitySchema).min(1)
 }).strict();
 
 export const searchOutputSchema = z.union([searchSuccessSchema, runtimeFailureSchema]);

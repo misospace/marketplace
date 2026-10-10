@@ -262,7 +262,12 @@ export function registerMarketplaceTools(
             schema_version: SCHEMA_VERSION,
             backend: backendName,
             shopping_backend: options.shopping?.name,
-            ...(sessionAssessment ? { facebook_session: { status: sessionAssessment() } } : {})
+            ...(sessionAssessment ? { facebook_session: { status: sessionAssessment() } } : {}),
+            capabilities: [
+              { surface: marketplaceScope.surface, provider: marketplaceScope.provider, backend: backendName },
+              { surface: shoppingScope.surface, provider: shoppingScope.provider, backend: options.shopping?.name ?? null },
+              { surface: messengerScope.surface, provider: messengerScope.provider, backend: options.conversations?.name ?? null }
+            ]
           };
         }
         validatedOutput = outputSchema.parse(output);
