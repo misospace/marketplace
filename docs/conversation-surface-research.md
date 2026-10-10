@@ -1,6 +1,6 @@
 # Conversation surface research (#43 step 1)
 
-Findings behind the read-only conversation capabilities (`messenger_threads_list`, `messenger_thread_read`). This document separates **verified** facts (public documentation, this repository's own behavior) from **assumed** contracts (written from research but not yet validated against the live Facebook surface), and states the validation plan. It complements `provider-action-boundaries.md`, which remains the normative enforcement contract.
+Findings behind the read-only conversation capabilities (`messenger_threads_list`, `messenger_thread_read`). This document separates **verified** facts (public documentation, this repository's own behavior) from **assumed** contracts (written from research but not yet validated against the live Facebook surface), and states the validation plan. It complements `provider-action-boundaries.md`, which remains the normative enforcement contract. The consolidated cross-capability inventory and integration-path decision record is [`capability-inventory.md`](capability-inventory.md) (#39); this document remains authoritative for the conversation surface and its live-DOM validation status.
 
 ## What Marketplace conversations are
 
