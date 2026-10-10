@@ -3,7 +3,7 @@ import { BrowserSessionManager, sleepUntilAbort } from './browser.js';
 import { ProviderError } from './backend.js';
 import {
   FACEBOOK_ORIGIN,
-  FACEBOOK_MESSENGER_PATH,
+  FACEBOOK_MESSENGER_INBOX_PATH,
   FACEBOOK_MARKETPLACE_PATH,
   classifyFacebookSession,
   normalizeFacebookBaseUrl,
@@ -55,7 +55,7 @@ export interface FacebookCredentialLoginOptions {
   /**
    * Which surface's authenticated state the login verifies before reporting success. The default
    * `marketplace` preserves the deployed behavior exactly; the messenger scope's login instance
-   * passes `messenger` so its post-approval verification navigates and classifies `/messages/`.
+   * passes `messenger` so its post-approval verification navigates and classifies `/marketplace/inbox/`.
    */
   surface?: 'marketplace' | 'messenger';
   waitMs?: number;
@@ -152,7 +152,7 @@ export class FacebookCredentialLogin {
     }
     // The login verifies success on its own surface's entry point: the messenger scope's login
     // must not depend on Marketplace being reachable to confirm an approval that already landed.
-    this.verifyUrl = new URL(this.surface === 'messenger' ? FACEBOOK_MESSENGER_PATH : FACEBOOK_MARKETPLACE_PATH, this.baseUrl).href;
+    this.verifyUrl = new URL(this.surface === 'messenger' ? FACEBOOK_MESSENGER_INBOX_PATH : FACEBOOK_MARKETPLACE_PATH, this.baseUrl).href;
     // Held off-instance so serializing the login object cannot expose the credentials.
     credentialStore.set(this, { username: options.username, password: options.password });
     this.waitMs = options.waitMs ?? FACEBOOK_LOGIN_WAIT_DEFAULT_MS;

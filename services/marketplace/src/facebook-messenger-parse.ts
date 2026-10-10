@@ -7,6 +7,7 @@ import {
 } from './domain.js';
 import type { ExtractedInboxPage, ExtractedThreadPage } from './facebook-messenger-extract.js';
 import { buildMessengerThreadUrl } from './facebook-messenger-url.js';
+import type { MessengerInboxGraphQLObservation } from './facebook-messenger-inbox-graphql.js';
 
 export type MessengerInboxPageKind = 'captcha' | 'checkpoint' | 'login' | 'threads' | 'empty' | 'unknown';
 export type MessengerThreadPageKind = 'captcha' | 'checkpoint' | 'login' | 'messages' | 'unknown';
@@ -39,6 +40,7 @@ export function interpretMessengerInboxPage(input: {
   baseUrl: string;
   inboxPath: string;
   limit: number;
+  graphql?: MessengerInboxGraphQLObservation;
 }): MessengerInboxOutcome {
   const kind = classifyMessengerInboxPage(input.page);
   if (kind === 'captcha') return { kind: 'error', code: 'CAPTCHA_REQUIRED', message: 'Facebook requires a captcha challenge.' };
@@ -50,6 +52,20 @@ export function interpretMessengerInboxPage(input: {
   const inboxPrefix = input.inboxPath.endsWith('/') ? input.inboxPath.slice(0, -1) : input.inboxPath;
   const atInbox = isExpectedPathname(input.page.url, input.baseUrl, (pathname) => pathname === inboxPrefix || pathname.startsWith(`${inboxPrefix}/`));
   if (!atInbox) return { kind: 'error', code: 'UPSTREAM_ERROR', message: 'The Facebook Marketplace inbox page was not reached at the expected address.' };
+  const graphql = input.graphql;
+  if (graphql && graphql.threadIds.length > 0) {
+    const threads: ConversationThread[] = [];
+    for (const threadId of graphql.threadIds.slice(0, input.limit)) {
+      const parsed = conversationThreadSchema.safeParse({ thread_id: threadId });
+      if (parsed.success) threads.push(parsed.data);
+    }
+    if (threads.length > 0) return { kind: 'threads', threads };
+  }
+  if (graphql?.malformed) return { kind: 'error', code: 'UPSTREAM_ERROR', message: 'The Facebook Marketplace inbox threads could not be parsed.' };
+  if (graphql?.empty) return { kind: 'empty' };
+  if (graphql?.recognized) return { kind: 'error', code: 'UPSTREAM_ERROR', message: 'The Facebook Marketplace inbox threads could not be parsed.' };
+  // Without a verified GraphQL connection the DOM anchors are the only remaining signal, and they
+  // are trusted only when the page is a recognized authenticated inbox (never on an unknown layout).
   if (kind === 'unknown') return { kind: 'error', code: 'UPSTREAM_ERROR', message: 'The Facebook Marketplace inbox page layout was not recognized.' };
   if (kind === 'empty') return { kind: 'empty' };
 

@@ -6,6 +6,7 @@ import type { ProviderErrorCode } from './domain.js';
 export const FACEBOOK_ORIGIN = 'https://www.facebook.com';
 export const FACEBOOK_MARKETPLACE_PATH = '/marketplace/';
 export const FACEBOOK_MESSENGER_PATH = '/messages/';
+export const FACEBOOK_MESSENGER_INBOX_PATH = '/marketplace/inbox/';
 
 export const FACEBOOK_PROBE_OUTCOMES = ['marketplace_authenticated', 'messages_authenticated', 'login_required', 'login_redirect', 'checkpoint', 'captcha', 'ambiguous'] as const;
 export type FacebookProbeOutcome = typeof FACEBOOK_PROBE_OUTCOMES[number];
@@ -63,7 +64,7 @@ export class FacebookSessionProbe {
     this.baseUrl = normalizeFacebookBaseUrl(options.baseUrl ?? FACEBOOK_ORIGIN);
     this.surface = options.surface ?? 'marketplace';
     if (this.surface !== 'marketplace' && this.surface !== 'messenger') throw new TypeError('surface must be marketplace or messenger');
-    const probePath = options.probePath ?? (this.surface === 'messenger' ? FACEBOOK_MESSENGER_PATH : FACEBOOK_MARKETPLACE_PATH);
+    const probePath = options.probePath ?? (this.surface === 'messenger' ? FACEBOOK_MESSENGER_INBOX_PATH : FACEBOOK_MARKETPLACE_PATH);
     if (typeof probePath !== 'string' || !probePath.startsWith('/')) throw new TypeError('probePath must start with /');
     const probeUrl = new URL(probePath, this.baseUrl);
     if (probeUrl.origin !== this.baseUrl) throw new TypeError('probePath must resolve to the same origin as baseUrl');
@@ -222,7 +223,10 @@ function isMessengerUrl(value: string, baseUrl: string): boolean {
   try {
     const url = new URL(value);
     const base = new URL(baseUrl);
-    return url.origin === base.origin && url.pathname.startsWith('/messages');
+    return url.origin === base.origin && (
+      url.pathname === '/messages' || url.pathname.startsWith('/messages/') ||
+      url.pathname === '/marketplace/inbox' || url.pathname.startsWith('/marketplace/inbox/')
+    );
   } catch {
     return false;
   }

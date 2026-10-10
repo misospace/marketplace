@@ -18,7 +18,7 @@ if (!browserAvailable && process.env.REQUIRE_BROWSER_TESTS === '1') {
 
 const fixtureDir = new URL('./fixtures/facebook-messenger/', import.meta.url);
 const fixtures = new Map([
-  'inbox-normal.html', 'inbox-empty.html', 'inbox-login.html', 'inbox-checkpoint.html', 'inbox-layout-changed.html',
+  'inbox-normal.html', 'inbox-empty.html', 'inbox-login.html', 'inbox-checkpoint.html', 'inbox-layout-changed.html', 'inbox-buttons-graphql.html',
   'thread-normal.html', 'thread-layout-changed.html'
 ].map((name) => [name, readFileSync(new URL(name, fixtureDir), 'utf8')]));
 
@@ -27,6 +27,7 @@ let origin: string;
 let inboxFixture = 'inbox-normal.html';
 let threadFixture = 'thread-normal.html';
 let hangInbox = false;
+let graphqlPayload: unknown = { data: { viewer: { marketplaceInboxBuyerMessageThreads: { edges: [] } } } };
 let inboxRedirectTarget: string | undefined;
 let threadRedirectTarget: string | undefined;
 const requests: string[] = [];
@@ -37,6 +38,12 @@ beforeAll(async () => {
   server = createServer((request, response) => {
     const pathname = new URL(request.url ?? '/', 'http://127.0.0.1').pathname;
     requests.push(request.url ?? pathname);
+    if (pathname === '/api/graphql/inbox') {
+      const body = JSON.stringify(graphqlPayload);
+      response.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'content-length': Buffer.byteLength(body) });
+      response.end(body);
+      return;
+    }
     if (hangInbox && pathname === '/marketplace/inbox/') return;
     // Redirect hooks simulate Facebook canonicalizing or moving an address; the redirect target
     // is served by the ordinary route table so only the URL assertion can tell the difference.
@@ -72,7 +79,7 @@ afterAll(async () => {
 });
 
 afterEach(async () => {
-  expect(requests.every((request) => /^\/(?:messages\/|marketplace\/inbox\/|messages\/t\/[A-Za-z0-9._-]+\/)$/.test(request))).toBe(true);
+  expect(requests.every((request) => /^\/(?:api\/graphql\/[^?]*|messages\/|marketplace\/inbox\/|messages\/t\/[A-Za-z0-9._-]+\/)$/.test(request))).toBe(true);
   await Promise.allSettled(managers.splice(0).map((manager) => manager.close()));
   for (const profileDir of profileDirs.splice(0)) rmSync(profileDir, { recursive: true, force: true });
   requests.length = 0;
@@ -81,6 +88,7 @@ afterEach(async () => {
   hangInbox = false;
   inboxRedirectTarget = undefined;
   threadRedirectTarget = undefined;
+  graphqlPayload = { data: { viewer: { marketplaceInboxBuyerMessageThreads: { edges: [] } } } };
 });
 
 function configure(nextInbox = 'inbox-normal.html', nextThread = 'thread-normal.html', nextHangInbox = false): void {
@@ -128,8 +136,38 @@ describe.skipIf(!browserAvailable)('Facebook Messenger backend', () => {
       { thread_id: '1684432532', preview: 'Synthetic Seller: Is the desk available?' },
       { thread_id: '1684432533', preview: 'Sample Buyer: Thanks for the details.Listing details', item_id: '123456789' }
     ]);
-    expect(requests).toEqual(['/messages/', '/marketplace/inbox/']);
+    expect(requests).toEqual(['/marketplace/inbox/', '/marketplace/inbox/']);
   });
+
+  it('lists deduplicated ids from a passive GraphQL response on a button-only page', async () => {
+    configure('inbox-buttons-graphql.html');
+    graphqlPayload = { data: { viewer: { marketplaceInboxBuyerMessageThreads: { edges: [
+      { node: { __typename: 'MessageThread', thread_key: { thread_fbid: '87654321' }, id: 'message_thread:87654321' } },
+      { node: { __typename: 'MessageThread', thread_key: { thread_fbid: '87654321' }, id: 'message_thread:87654321' } },
+      { node: { __typename: 'MessageThread', thread_key: { thread_fbid: '87654322' } } }
+    ] } } } };
+    const backend = createBackend();
+    const threads = await backend.listThreads(listInput(), new AbortController().signal);
+    expect(threads).toEqual([{ thread_id: '87654321' }, { thread_id: '87654322' }]);
+    expect(JSON.stringify(threads)).not.toContain('message_thread:');
+    expect(JSON.stringify(threads)).not.toContain('response body');
+    expect(requests).toContain('/api/graphql/inbox');
+  }, 15_000);
+
+  it('uses a valid empty GraphQL connection and rejects absent or malformed connections', async () => {
+    configure('inbox-buttons-graphql.html');
+    const backend = createBackend({ settleTimeoutMs: 30 });
+    graphqlPayload = { data: { viewer: { marketplaceInboxBuyerMessageThreads: { edges: [] } } } };
+    await expect(backend.listThreads(listInput(), new AbortController().signal)).resolves.toEqual([]);
+
+    configure('inbox-buttons-graphql.html');
+    graphqlPayload = { data: { viewer: {} } };
+    await expectProviderError(backend.listThreads(listInput(), new AbortController().signal), 'UPSTREAM_ERROR');
+
+    configure('inbox-buttons-graphql.html');
+    graphqlPayload = { data: { viewer: { marketplaceInboxBuyerMessageThreads: { edges: [{ node: { __typename: 'MessageThread', thread_key: { thread_fbid: 'bad id' } } }] } } } };
+    await expectProviderError(backend.listThreads(listInput(), new AbortController().signal), 'UPSTREAM_ERROR');
+  }, 30_000);
 
   it('returns empty only for a recognized empty inbox', async () => {
     configure('inbox-empty.html');
@@ -155,7 +193,7 @@ describe.skipIf(!browserAvailable)('Facebook Messenger backend', () => {
       'LOGIN_REQUIRED',
       'Facebook login is required to read Marketplace conversations.'
     );
-    expect(requests).toEqual(['/messages/']);
+    expect(requests).toEqual(['/marketplace/inbox/']);
   });
 
   it('uses the shared credential recovery path after a Messenger login probe', async () => {
@@ -191,7 +229,7 @@ describe.skipIf(!browserAvailable)('Facebook Messenger backend', () => {
         { sender: 'other', sender_name: 'Example Buyer', text: 'Could I pick it up tomorrow?' }
       ]
     });
-    expect(requests).toEqual(['/messages/', '/messages/t/1684432532/']);
+    expect(requests).toEqual(['/marketplace/inbox/', '/messages/t/1684432532/']);
   });
 
   it('fails closed for a thread page with no recognized message rows', async () => {
