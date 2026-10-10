@@ -1,6 +1,6 @@
 # Messenger ordinary personal inbox discovery (#78)
 
-Parent: #45 (consumer Messenger). Related Marketplace-only recovery: #64. Design record: PR #74 (`docs/messenger-consumer-research.md`, pending corrections). Status: research complete — verdict is **NO-GO** for building a consumer listing tool now. The ordinary `/messages/` discovery contract is **unverified and cannot be established from this repository**; this document specifies the conditional contract and the read-only operator validation protocol that would gate a future ticket. It complements `provider-action-boundaries.md` (normative enforcement) and `conversation-surface-research.md` (#43 step 1, authoritative for the Marketplace surface).
+Parent: #45 (consumer Messenger). Related Marketplace-only recovery: #64. Design record: PR #74, which carries `docs/messenger-consumer-research.md` on branch `courier/misospace/musebridge/issue-45` (not yet merged into `main`; referenced here only as a forward pointer). Status: research complete — verdict is **NO-GO** for building a consumer listing tool now. The ordinary `/messages/` discovery contract is **unverified and cannot be established from this repository**; this document specifies the conditional contract and the read-only operator validation protocol that would gate a future ticket. It complements `provider-action-boundaries.md` (normative enforcement) and `conversation-surface-research.md` (#43 step 1, authoritative for the Marketplace surface).
 
 ## What #78 asks
 
@@ -31,7 +31,7 @@ What the issue requires:
 **Does not exist:**
 
 - Any ordinary-inbox listing logic. `/messages/` appears in the codebase only as the messenger session-probe target (`FACEBOOK_MESSENGER_PATH = '/messages/'`, `services/marketplace/src/facebook.ts:8`; the probe path is selected per surface, `facebook.ts:64-70`).
-- The extractor only recognizes `/messages/t/{id}/` anchors with the id grammar `^[A-Za-z0-9][A-Za-z0-9._-]*$` bounded to 128 (`services/marketplace/src/facebook-messenger-extract.ts:70,102-142`), thread message rows `[role="row"]` with `You said/sent/replied:` / `{Name} said:` markers (`facebook-messenger-extract.ts:172-201`), and the empty marker `no conversations|no messages yet|nothing here yet` (`facebook-messenger-extract.ts:101`).
+- The extractor only recognizes `/messages/t/{id}/` anchors with the id grammar `^[A-Za-z0-9][A-Za-z0-9._-]*$` bounded to 128 (`services/marketplace/src/facebook-messenger-extract.ts:70,118`), thread message rows `[role="row"]` with `You said/sent/replied:` / `{Name} said:` markers (`facebook-messenger-extract.ts:172-201`), and the empty marker `no conversations|no messages yet|nothing here yet` (`facebook-messenger-extract.ts:101`).
 - An unrecognized layout is a typed `UPSTREAM_ERROR`, never an empty success (`services/marketplace/src/facebook-messenger-parse.ts`).
 
 ## Critical finding (auto-open probe risk)
@@ -40,9 +40,11 @@ The messenger probe **already navigates `/messages/` on every messenger tool cal
 
 1. `messenger_threads_list` and `messenger_thread_read` both call `ensureUsableSession` (`facebook-messenger-backend.ts:104,157`).
 2. `ensureUsableSession` calls `probeSession` (`facebook-messenger-backend.ts:205-208`).
-3. The messenger-surface probe navigates its probe URL, which is `/messages/` (`facebook.ts:8,64-70,79`).
+3. The messenger-surface probe navigates its probe URL, which is `/messages/` (`facebook.ts:8,64-70`; the navigation is `loadSnapshot` → `page.goto(this.probeUrl)` at `facebook.ts:103-107`).
 
 **Open risk:** if `/messages/` auto-opens a conversation on load, the existing probe may already be emitting a provider-visible "Seen" receipt for that conversation — before any consumer tool exists. This is unverified. **No new `/messages/` navigation may be added until non-auto-open behavior is verified** by the operator protocol below. This risk is a reason the verdict is NO-GO rather than "proceed carefully."
+
+**Base and in-flight change.** This document is written against `main` at `ff215e2`, where the messenger probe still navigates `/messages/`. The Marketplace-only recovery branch for #64 (PR #81, commit `842ae03`) already rewrites the messenger-scope probe and credential-login verification to the non-opening Marketplace inbox path (`FACEBOOK_MESSENGER_INBOX_PATH = '/marketplace/inbox/'`, `facebook.ts:9,67`). If that lands before this document's gate is reached, the **probe-navigation** risk is removed from `messenger_threads_list` calls, but the **listing-navigation** risk (any new `consumer_threads_list` that visits `/messages/`) and the whole ordinary-inbox discovery question remain open. The operator protocol is still required before a consumer listing tool is built.
 
 ## Access paths evaluated
 
@@ -96,7 +98,7 @@ If, and only if, the operator protocol below positively verifies a passive autho
 - **Risk class:** `read`, under the thread-opens-only Seen exception — and only if listing opens no threads.
 - **Input:** bounded `limit`, mirroring the existing 1..20 default 10 (`domain.ts:151-153`).
 - **Output:** `{ ok, backend, threads[] }` with an opaque, grammar-bounded key (`MAX_THREAD_ID_LENGTH = 128`, `domain.ts:9,36`) and no inferred preview/participant fields.
-- **Fail-closed:** unrecognized layout or absent/unsupported key source → typed error, never empty success; ids never synthesized; read URLs (if ever added) rebuilt from the configured origin with the redirect guard.
+- **Fail-closed:** unrecognized layout or absent/unsupported key source → typed error, never empty success; ids never synthesized; read URLs (if ever added) rebuilt from the configured origin with the redirect guard (`facebook-messenger-parse.ts:102-107`; inbox guard `:51-52`).
 
 ## Observable errors
 
@@ -105,6 +107,7 @@ Reuse the existing typed sets:
 - Provider codes: `AUTH_EXPIRED, LOGIN_REQUIRED, CAPTCHA_REQUIRED, SESSION_INVALID, RATE_LIMITED, UPSTREAM_ERROR, TIMEOUT` (`domain.ts:14-22`).
 - Runtime adds `NOT_FOUND, INTERNAL_ERROR, APPROVAL_REQUIRED, ACTION_FORBIDDEN` (`domain.ts:162-168`).
 - `UPSTREAM_ERROR` covers "layout/response not recognized"; `LOGIN_REQUIRED`/`CAPTCHA_REQUIRED`/`SESSION_INVALID` cover auth and challenge states; `TIMEOUT` covers a page/response that never settles.
+- The existing human-readable messages are Marketplace-worded (`facebook-messenger-backend.ts:296-303`, e.g. "…to read Marketplace conversations"); an ordinary-inbox tool must re-target or neutralize that wording rather than reuse it verbatim.
 
 ## Fixtures and bounded tests (specified, not built)
 
@@ -136,12 +139,15 @@ Run manually in an authenticated Chrome session; record **counts and booleans on
 
 ## Verified vs assumed
 
-**Verified (this repository / live #64 evidence):**
+**Verified in this repository (code state at `ff215e2`):**
 
 - The Marketplace scoping and tool declarations; the `/marketplace/inbox/` list path and `/messages/t/{id}/` read path; the probe targeting `/messages/`.
 - The extractor's anchor/row/empty-marker rules and fail-closed parse; thread-id grammar and bounds; provider/runtime error codes; input limits and output shape.
 - The `MARKETPLACE_MESSENGER=1` gate and messenger profile default.
-- #64's live finding (2026-10-08): the Marketplace inbox had 24 conversation buttons and zero `/messages/t/` anchors, with GraphQL `CometMarketplaceInboxBuyerTabViewContainerQuery`/`PaginationQuery` carrying `data.viewer.marketplaceInboxBuyerMessageThreads.edges[].node` (`__typename: "MessageThread"`, `thread_key.thread_fbid`) — **Marketplace-scope ONLY**.
+
+**Live #64 evidence (issue #64's 2026-10-08 inspection; a parallel branch, not current code state):**
+
+- The Marketplace inbox had 24 conversation buttons and zero `/messages/t/` anchors, with GraphQL `CometMarketplaceInboxBuyerTabViewContainerQuery`/`PaginationQuery` carrying `data.viewer.marketplaceInboxBuyerMessageThreads.edges[].node` (`__typename: "MessageThread"`, `thread_key.thread_fbid`) — **Marketplace-scope ONLY**, and not assumed for `/messages/`.
 
 **Assumed / unverified (do not treat as fact):**
 
@@ -165,7 +171,7 @@ Mapped to `provider-action-boundaries.md`:
 ## Deliberate gaps / recommendation
 
 - **Recommendation:** close #78 with **NO-GO** for building a consumer listing tool now. The ordinary `/messages/` discovery contract cannot be established from this repository, and the probe's existing `/messages/` navigation may already carry an unverified receipt risk.
-- **#78 acceptance criteria mapped:** (1) verified structural contract *or* evidence-based no-go → **this document is the evidence-based no-go**; (2) no threads opened / no receipts without approval → **enforced by the protocol's step 2/9 stop rule**; (3) privacy-safe evidence, known failure modes, bounded tests → **specified above, not built**; (4) focused implementation child **only** when verified → **none created here**.
+- **#78 acceptance criteria mapped:** (1) verified structural contract *or* evidence-based no-go → **this document is the evidence-based no-go**; (2) no threads opened / no receipts without approval → **enforced by the protocol's step 9 (auto-open) stop rule**; (3) privacy-safe evidence, known failure modes, bounded tests → **specified above, not built**; (4) focused implementation child **only** when verified → **none created here**.
 - **No implementation child is proposed.** A future ticket may be opened only after the operator protocol positively verifies a passive authoritative key and non-auto-open behavior.
 - **Cross-links:** `provider-action-boundaries.md` (normative enforcement), `conversation-surface-research.md` (#43 step 1 Marketplace surface), PR #74 `docs/messenger-consumer-research.md` (consumer Messenger design record), #64 (Marketplace-only listing recovery), and `services/marketplace/AGENTS.md` (scope, credential, privacy invariants).
 - **Reopen condition:** only when a read-only operator validation run establishes a passive authoritative key for the ordinary `/messages/` inbox **and** confirms the surface does not auto-open a conversation. Until both hold, the verdict stands as final.
