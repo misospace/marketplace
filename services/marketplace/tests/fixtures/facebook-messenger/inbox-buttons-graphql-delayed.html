@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Synthetic delayed button inbox</title></head>
+<body>
+  <main role="main">
+    <header><span aria-label="Your account">Synthetic account</span></header>
+    <section aria-label="Conversations"><button type="button">Conversation button</button></section>
+  </main>
+  <script>
+    // The inbox connection arrives after the initial DOM read but well inside the settle budget.
+    setTimeout(() => {
+      fetch('/api/graphql/inbox', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ operationName: 'CometMarketplaceInboxBuyerTabViewPaginationQuery' }) });
+    }, 300);
+  </script>
+</body>
+</html>

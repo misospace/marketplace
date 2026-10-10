@@ -71,17 +71,12 @@ export function parseMessengerInboxGraphQLResponse(payload: unknown): ParsedResp
 
 /**
  * The verified GraphQL `id` is a Facebook global id that decodes to `message_thread:<thread_fbid>`.
- * Accept the literal form or its base64 decoding; anything else is an inconsistent key and is
+ * Accept the literal form or its exact base64 encoding; anything else is an inconsistent key and is
  * skipped rather than attributed to a thread. Non-thread id shapes are left to `thread_key`.
  */
 function isConsistentThreadId(id: string, threadId: string): boolean {
   const expected = `message_thread:${threadId}`;
-  if (id === expected) return true;
-  try {
-    return Buffer.from(id, 'base64').toString('utf8') === expected;
-  } catch {
-    return false;
-  }
+  return id === expected || id === Buffer.from(expected).toString('base64');
 }
 
 export class MessengerInboxGraphQLCollector {

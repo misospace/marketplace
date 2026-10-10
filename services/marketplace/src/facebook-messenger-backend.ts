@@ -29,7 +29,7 @@ import {
 } from './facebook-messenger-url.js';
 import { assertFacebookOrigin, FacebookSessionProbe, type FacebookProbeCode } from './facebook.js';
 import { FacebookCredentialLogin } from './facebook-login.js';
-import { MessengerInboxGraphQLCollector } from './facebook-messenger-inbox-graphql.js';
+import { MessengerInboxGraphQLCollector, MESSENGER_INBOX_OPERATIONS, type MessengerInboxGraphQLObservation } from './facebook-messenger-inbox-graphql.js';
 
 export interface FacebookMessengerBackendOptions {
   browser: BrowserSessionManager;
@@ -106,18 +106,24 @@ export class FacebookMessengerBackend implements ConversationBackend {
 
     const inboxUrl = assertFacebookOrigin(buildMessengerInboxUrl({ baseUrl: this.probe.baseUrl, inboxPath: this.inboxPath }));
     let extracted: ExtractedInboxPage;
-    let graphql: ReturnType<MessengerInboxGraphQLCollector['snapshot']> = { recognized: false, malformed: false, empty: false, threadIds: [] };
+    let graphql: MessengerInboxGraphQLObservation = { recognized: false, malformed: false, empty: false, threadIds: [] };
     try {
       const result = await this.browser.runExclusive(signal, async (page, taskSignal) => {
         const collector = new MessengerInboxGraphQLCollector({ maxThreads: this.maxThreads });
         let responseWork = Promise.resolve();
+        let dispatchedReads = 0;
         const baseOrigin = new URL(this.probe.baseUrl).origin;
         const handler = (response: import('playwright').Response): void => {
           responseWork = responseWork.then(async () => {
             try {
               const url = new URL(response.url());
               if (url.origin !== baseOrigin || !url.pathname.startsWith('/api/graphql/')) return;
-              if (!response.headers()['content-type']?.toLowerCase().includes('json')) return;
+              if (!isJsonContentType(response.headers()['content-type'])) return;
+              // Reject a response whose own request names a different GraphQL operation. When the
+              // request body is not observable the schema check below still has to agree.
+              if (matchInboxOperation(response.request()) === 'other') return;
+              if (dispatchedReads >= GRAPHQL_RESPONSE_READ_LIMIT) return;
+              dispatchedReads += 1;
               const payload = await readResponseBody(response);
               if (payload !== undefined) collector.observe(payload);
             } catch {
@@ -331,11 +337,14 @@ function messengerSessionMessage(code: FacebookProbeCode): string {
 
 /**
  * Reads a captured GraphQL response body without ever letting the read hang the tool. A response
- * whose body Chromium will not surface (for example one marked `Cache-Control: no-store`) must be
- * skipped rather than awaited forever; a missing observation is a fail-closed upstream error, never
- * fabricated data. The losing promise is settled so it cannot surface as an unhandled rejection.
+ * body that Chromium does not surface in time is skipped rather than awaited forever; a missing
+ * observation is a fail-closed upstream error, never fabricated data. The losing promise is
+ * settled so it cannot surface as an unhandled rejection. The dispatch counter in the handler
+ * separately bounds how many bodies are read, so unrelated same-origin GraphQL traffic cannot
+ * inflate the flush.
  */
 const GRAPHQL_BODY_READ_TIMEOUT_MS = 2_000;
+const GRAPHQL_RESPONSE_READ_LIMIT = 60;
 
 async function readResponseBody(response: import('playwright').Response): Promise<unknown> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -349,6 +358,28 @@ async function readResponseBody(response: import('playwright').Response): Promis
   } finally {
     if (timer) clearTimeout(timer);
   }
+}
+
+function isJsonContentType(value: string | undefined): boolean {
+  if (typeof value !== 'string') return false;
+  const mediaType = value.split(';', 1)[0]?.trim().toLowerCase();
+  return mediaType === 'application/json' || mediaType === 'text/json' || mediaType === 'application/graphql+json';
+}
+
+/**
+ * Classifies the observed request against the verified inbox operations. `unavailable` means the
+ * request body could not be read (e.g. a GET), in which case the response body schema remains the
+ * only guard; `other` means a body was read and named a different operation.
+ */
+function matchInboxOperation(request: import('playwright').Request): 'inbox' | 'other' | 'unavailable' {
+  let postData: string | null;
+  try {
+    postData = request.postData();
+  } catch {
+    return 'unavailable';
+  }
+  if (typeof postData !== 'string' || postData.length === 0) return 'unavailable';
+  return MESSENGER_INBOX_OPERATIONS.some((operation) => postData.includes(operation)) ? 'inbox' : 'other';
 }
 
 function waitForRequestBudget<T>(promise: Promise<T>, signal: AbortSignal): Promise<T | undefined> {

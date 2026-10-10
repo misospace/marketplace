@@ -18,7 +18,7 @@ if (!browserAvailable && process.env.REQUIRE_BROWSER_TESTS === '1') {
 
 const fixtureDir = new URL('./fixtures/facebook-messenger/', import.meta.url);
 const fixtures = new Map([
-  'inbox-normal.html', 'inbox-empty.html', 'inbox-login.html', 'inbox-checkpoint.html', 'inbox-layout-changed.html', 'inbox-buttons-graphql.html',
+  'inbox-normal.html', 'inbox-empty.html', 'inbox-login.html', 'inbox-checkpoint.html', 'inbox-layout-changed.html', 'inbox-buttons-graphql.html', 'inbox-buttons-graphql-delayed.html',
   'thread-normal.html', 'thread-layout-changed.html'
 ].map((name) => [name, readFileSync(new URL(name, fixtureDir), 'utf8')]));
 
@@ -40,6 +40,16 @@ beforeAll(async () => {
     requests.push(request.url ?? pathname);
     if (pathname === '/api/graphql/inbox') {
       const body = JSON.stringify(graphqlPayload);
+      response.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'content-length': Buffer.byteLength(body) });
+      response.end(body);
+      return;
+    }
+    if (pathname === '/api/graphql/other') {
+      // A same-origin response for a different operation that still embeds the inbox connection
+      // name: operation validation, not shape alone, must reject it.
+      const body = JSON.stringify({ data: { viewer: { marketplaceInboxBuyerMessageThreads: { edges: [
+        { node: { __typename: 'MessageThread', thread_key: { thread_fbid: '99999999' }, id: 'message_thread:99999999' } }
+      ] } } } });
       response.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'content-length': Buffer.byteLength(body) });
       response.end(body);
       return;
@@ -142,16 +152,31 @@ describe.skipIf(!browserAvailable)('Facebook Messenger backend', () => {
   it('lists deduplicated ids from a passive GraphQL response on a button-only page', async () => {
     configure('inbox-buttons-graphql.html');
     graphqlPayload = { data: { viewer: { marketplaceInboxBuyerMessageThreads: { edges: [
-      { node: { __typename: 'MessageThread', thread_key: { thread_fbid: '87654321' }, id: 'message_thread:87654321' } },
+      { node: { __typename: 'MessageThread', thread_key: { thread_fbid: '87654321' }, id: 'message_thread:87654321', snippet: 'OPAQUE-SNIPPET-SENTINEL' } },
       { node: { __typename: 'MessageThread', thread_key: { thread_fbid: '87654321' }, id: 'message_thread:87654321' } },
       { node: { __typename: 'MessageThread', thread_key: { thread_fbid: '87654322' } } }
     ] } } } };
     const backend = createBackend();
     const threads = await backend.listThreads(listInput(), new AbortController().signal);
     expect(threads).toEqual([{ thread_id: '87654321' }, { thread_id: '87654322' }]);
-    expect(JSON.stringify(threads)).not.toContain('message_thread:');
-    expect(JSON.stringify(threads)).not.toContain('response body');
+    const serialized = JSON.stringify(threads);
+    // The unrelated same-origin operation and every unapproved field stay out of the result.
+    expect(serialized).not.toContain('99999999');
+    expect(serialized).not.toContain('OPAQUE-SNIPPET-SENTINEL');
+    expect(serialized).not.toContain('marketplaceInboxBuyerMessageThreads');
+    expect(serialized).not.toContain('thread_key');
     expect(requests).toContain('/api/graphql/inbox');
+    expect(requests).toContain('/api/graphql/other');
+  }, 15_000);
+
+  it('captures a GraphQL response that lands after the first DOM read but within the settle budget', async () => {
+    configure('inbox-buttons-graphql-delayed.html');
+    graphqlPayload = { data: { viewer: { marketplaceInboxBuyerMessageThreads: { edges: [
+      { node: { __typename: 'MessageThread', thread_key: { thread_fbid: '55550000' }, id: 'message_thread:55550000' } }
+    ] } } } };
+    const backend = createBackend({ settleTimeoutMs: 1_500 });
+    const threads = await backend.listThreads(listInput(), new AbortController().signal);
+    expect(threads).toEqual([{ thread_id: '55550000' }]);
   }, 15_000);
 
   it('uses a valid empty GraphQL connection and rejects absent or malformed connections', async () => {

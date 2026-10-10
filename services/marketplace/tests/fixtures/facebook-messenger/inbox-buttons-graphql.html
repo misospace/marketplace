@@ -7,7 +7,10 @@
     <section aria-label="Conversations"><button type="button">Conversation button</button></section>
   </main>
   <script>
+    // The verified inbox connection, plus an unrelated same-origin GraphQL response that the
+    // observer must reject by operation name rather than treat as inbox data.
     fetch('/api/graphql/inbox', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ operationName: 'CometMarketplaceInboxBuyerTabViewContainerQuery' }) });
+    fetch('/api/graphql/other', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ operationName: 'UnrelatedMarketplaceQuery' }) });
   </script>
 </body>
 </html>
