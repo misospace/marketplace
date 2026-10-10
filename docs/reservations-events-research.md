@@ -94,7 +94,7 @@ eventAvailability = {
 Mapping notes:
 
 - `status` is derived from Ticketmaster's `dates.status.code`. Live Discovery responses yield only `on_sale`, `off_sale`, `cancelled`, `postponed`, `rescheduled`, or `unknown`; an unrecognized code maps to `unknown` rather than guessing. **`sold_out` is fixture-only** — Discovery cannot prove sold-out, so a live response must never produce it.
-- `starts_at` is taken from `dates.start.dateTime` (an ISO 8601 instant carrying an offset) when present and parseable; otherwise it is `null` (date/time TBD/TBA, or no resolvable instant). The mapper deliberately does **not** fabricate an offset by combining `localDate`/`localTime` with `dates.timezone`. The `dateTBD` / `dateTBA` / `timeTBA` flags are honored by treating their absence as "no resolvable instant": a `dateTime` is required and a missing or malformed one yields `null` rather than a guessed value.
+- `starts_at` is taken from `dates.start.dateTime` (an ISO 8601 instant carrying an offset) when present and parseable; otherwise it is `null` (date/time TBD/TBA, or no resolvable instant). The mapper deliberately does **not** fabricate an offset by combining `localDate`/`localTime` with `dates.timezone`. The `dateTBD` / `dateTBA` / `timeTBA` flags are honored by treating their absence as "no resolvable instant": a `dateTime` is required and a missing or malformed one yields `null` rather than a guessed value. A provider `dateTime` that lacks an offset (e.g. `2025-06-01T19:30:00`) is likewise rejected as having no resolvable instant and yields `starts_at: null` — the same outcome as TBD/TBA.
 - `price_min` / `price_max` / `currency` come from `priceRanges[]` (face value; fees not guaranteed).
 - `on_sale_start` / `on_sale_end` come from `sales.public.startDateTime` / `endDateTime`.
 - `venue` / `location` come from `_embedded.venues[]` (name; city and country code).
@@ -121,6 +121,8 @@ Regression tests cover the regional round trip (CA / UK / AU), lookalike rejecti
 |---|---|---|---|
 | `events_search` | `read` | `(ticketmaster, default, events)` | Searches the configured events source and returns bounded `eventAvailability` facts |
 | `events_fetch` | `read` | `(ticketmaster, default, events)` | Fetches one event by id from the configured events source |
+
+Contract: events with an unknown start date/time (`starts_at: null`) are excluded from date-bounded searches (when `start_date` and/or `end_date` is supplied) on both the fixture and provider paths; they remain visible in unbounded searches and via `events_fetch`.
 
 Configuration: `EVENTS_BACKEND=fixture|ticketmaster` (default `fixture`, so the tool list is stable without keys, mirroring the shopping opt-in pattern). Key material is read from `TICKETMASTER_API_KEY` in the environment when the service constructs the Ticketmaster client, and is never logged or returned.
 

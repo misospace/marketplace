@@ -134,7 +134,10 @@ function isTicketmasterHost(host: string): boolean {
 function eventIdFromUrl(value: string): string | null {
   let url: URL;
   try { url = new URL(value); } catch { return null; }
-  if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
+  // https-only: the id extracted here gates a credentialed API call, and provider-served
+  // event URLs are https-only, so the parser keeps no http allowance — it matches the
+  // client's destination policy rather than relying on it downstream.
+  if (url.protocol !== 'https:') return null;
   if (url.username || url.password) return null;
   if (!isTicketmasterHost(url.hostname)) return null;
   // Pull the path segment after `event` so the ID boundary is the segment boundary, not the

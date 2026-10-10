@@ -172,6 +172,11 @@ export class FixtureEventsBackend implements EventsBackend {
     return FIXTURE_EVENTS.filter((event) => {
       const matchesText = event.name.toLowerCase().includes(query);
       const matchesCity = city === undefined || (event.location !== null && event.location.toLowerCase().includes(city));
+      // The slice(0, 10) lexicographic compare is safe because starts_at is schema-validated as ISO
+      // 8601 with an offset and the date inputs are regex-validated YYYY-MM-DD, so string comparison
+      // orders instants correctly. Events with starts_at: null (TBD/TBA) are intentionally excluded
+      // from any bounded search (start_date and/or end_date supplied) per the documented contract;
+      // they remain visible in unbounded searches and via events_fetch.
       const startsOn = event.starts_at === null ? null : event.starts_at.slice(0, 10);
       const matchesStart = input.start_date === undefined || (startsOn !== null && startsOn >= input.start_date);
       const matchesEnd = input.end_date === undefined || (startsOn !== null && startsOn <= input.end_date);

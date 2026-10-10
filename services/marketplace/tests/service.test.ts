@@ -538,6 +538,20 @@ describe('fixture MCP service', () => {
     expect(missing).toEqual({ ok: false, error: { code: 'NOT_FOUND', message: 'No event matched the supplied identifier.' } });
   });
 
+  it('excludes null starts_at events from date-bounded searches while keeping them in unbounded results', async () => {
+    const client = await connectClient();
+    const unbounded = structured(await client.callTool({ name: 'events_search', arguments: { query: 'synthetic' } }));
+    const unboundedIds = unbounded.events.map((event: { id: string }) => event.id);
+    // synth-event-002 and synth-event-004 have starts_at: null (TBD/TBA).
+    expect(unboundedIds).toContain('synth-event-002');
+    expect(unboundedIds).toContain('synth-event-004');
+    const bounded = structured(await client.callTool({ name: 'events_search', arguments: { query: 'synthetic', start_date: '2000-01-01', end_date: '2099-12-31' } }));
+    const boundedIds = bounded.events.map((event: { id: string }) => event.id);
+    expect(boundedIds).not.toContain('synth-event-002');
+    expect(boundedIds).not.toContain('synth-event-004');
+    expect(boundedIds).toContain('synth-event-001');
+  });
+
   it('enables Messenger only for MARKETPLACE_MESSENGER=1', () => {
     expect(parseMessengerEnabled(undefined)).toBe(false);
     expect(parseMessengerEnabled('1')).toBe(true);

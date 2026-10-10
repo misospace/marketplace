@@ -143,12 +143,12 @@ describe('TicketmasterEventsBackend', () => {
     // A subdomain on a regional root is still trusted.
     const byLocale = await backend().fetch(eventsFetchInputSchema.parse({ url: 'https://www1.ticketmaster.ca/event/G5v0Z9Yqk1' }), signal());
     expect(byLocale).toMatchObject({ id: 'G5v0Z9Yqk1' });
-    // A host that is a real regional root but is on plain http still has its id extracted
-    // (the destination restriction on the API client is the real safety mechanism, and a
-    // future per-URL credential-destination check would belong there). The lookup itself
-    // does not navigate to the URL.
-    const byHttpCa = await backend().fetch(eventsFetchInputSchema.parse({ url: 'http://www.ticketmaster.ca/event/G5v0Z9Yqk1' }), signal());
-    expect(byHttpCa).toMatchObject({ id: 'G5v0Z9Yqk1' });
+    // A host that is a real regional root but is on plain http is rejected (the parser is
+    // https-only), so id extraction is never more permissive than the credential
+    // destination policy.
+    await expect(backend().fetch(eventsFetchInputSchema.parse({ url: 'http://www.ticketmaster.ca/event/G5v0Z9Yqk1' }), signal())).rejects.toMatchObject({
+      code: 'UPSTREAM_ERROR', message: 'The Ticketmaster event URL does not contain an event id.'
+    });
   });
 
   it('extracts the id by path segment so a longer id or a non-event path is handled correctly', async () => {
