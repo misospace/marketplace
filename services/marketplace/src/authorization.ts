@@ -1,5 +1,6 @@
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
+import { InMemoryGrantConsumptionStore, type GrantConsumptionStore } from './grant-state.js';
 
 export const ACTION_RISK_CLASSES = ['read', 'prepare', 'send', 'high_consequence'] as const;
 export type ActionRiskClass = typeof ACTION_RISK_CLASSES[number];
@@ -84,14 +85,25 @@ function constantTimeEqual(a: string, b: string): boolean {
 
 export class HmacGrantAuthorizer implements ActionAuthorizer {
   private readonly secret: string;
-  private readonly consumedGrantIds = new Set<string>();
+  private readonly store: GrantConsumptionStore;
   private readonly now: () => Date;
 
-  constructor(options: { readonly secret: string; readonly now?: () => Date }) {
+  constructor(options: {
+    readonly secret: string;
+    readonly now?: () => Date;
+    /**
+     * Single-use grant consumption state. The default in-memory store is
+     * process-local only: a consumed grant would be replayable after a
+     * restart or on a second replica. Durable deployments must pass a file
+     * store.
+     */
+    readonly store?: GrantConsumptionStore;
+  }) {
     if (typeof options.secret !== 'string' || options.secret.length < 32) {
       throw new TypeError('secret must be a string of at least 32 characters');
     }
     this.secret = options.secret;
+    this.store = options.store ?? new InMemoryGrantConsumptionStore();
     this.now = options.now ?? (() => new Date());
   }
 
@@ -135,11 +147,15 @@ export class HmacGrantAuthorizer implements ActionAuthorizer {
       return { ok: false, code: 'ACTION_FORBIDDEN', message: 'The approval grant has expired.' };
     }
 
-    if (this.consumedGrantIds.has(envelope.grant.grant_id)) {
+    let claimed: boolean;
+    try {
+      claimed = this.store.claim(envelope.grant.grant_id, Date.parse(envelope.grant.expires_at));
+    } catch {
+      return { ok: false, code: 'ACTION_FORBIDDEN', message: 'Grant consumption state is unavailable.' };
+    }
+    if (!claimed) {
       return { ok: false, code: 'ACTION_FORBIDDEN', message: 'The approval grant has already been used.' };
     }
-
-    this.consumedGrantIds.add(envelope.grant.grant_id);
     return { ok: true };
   }
 }

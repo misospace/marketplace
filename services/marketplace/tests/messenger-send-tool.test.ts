@@ -87,39 +87,42 @@ function buildGrant(input: ThreadSendInput, overrides: Partial<GrantFields> = {}
   });
 }
 
-type SendScenario = 'ok' | 'timeout-confirmed' | 'timeout-unconfirmed' | 'timeout-read-fails' | 'session-invalid';
+type SendBehavior = 'ok' | 'timeout' | 'submit-upstream' | 'upstream' | 'session-invalid';
+type ReadBehavior = 'confirmed' | 'unconfirmed' | 'null' | 'throws';
 
-function fakeConversations(scenario: SendScenario, input: ThreadSendInput) {
+function fakeConversations(send: SendBehavior, read: ReadBehavior, input: ThreadSendInput) {
   const calls = { sendThread: 0, readThread: 0 };
   const conversations = {
     name: 'fixture',
     listThreads: () => [],
     readThread: () => {
       calls.readThread += 1;
-      if (scenario === 'timeout-read-fails') throw new ProviderError('TIMEOUT', 'The backend operation exceeded its deadline.');
-      if (scenario === 'timeout-confirmed') {
+      if (read === 'throws') throw new ProviderError('TIMEOUT', 'The backend operation exceeded its deadline.');
+      if (read === 'confirmed') {
         return { thread_id: input.thread_id, messages: [{ sender: 'you', text: renderDeliveredMessage(input) }] as ConversationMessage[] };
       }
-      if (scenario === 'timeout-unconfirmed') {
+      if (read === 'unconfirmed') {
         return { thread_id: input.thread_id, messages: [{ sender: 'you', text: 'A reply that carries no idempotency marker.' }] as ConversationMessage[] };
       }
       return null;
     },
     sendThread: () => {
       calls.sendThread += 1;
-      if (scenario === 'timeout-confirmed' || scenario === 'timeout-unconfirmed' || scenario === 'timeout-read-fails') {
-        throw new ProviderError('TIMEOUT', 'The backend operation exceeded its deadline.');
+      if (send === 'timeout') throw new ProviderError('TIMEOUT', 'The backend operation exceeded its deadline.');
+      if (send === 'submit-upstream') {
+        throw new ProviderError('UPSTREAM_ERROR', 'The Facebook Messenger message could not be sent.', { submit_triggered: true });
       }
-      if (scenario === 'session-invalid') throw new ProviderError('SESSION_INVALID', 'The messenger session is no longer valid.');
+      if (send === 'upstream') throw new ProviderError('UPSTREAM_ERROR', 'The Facebook Messenger message could not be sent.');
+      if (send === 'session-invalid') throw new ProviderError('SESSION_INVALID', 'The messenger session is no longer valid.');
     }
   } satisfies ConversationBackend;
   return { conversations, calls };
 }
 
 describe('messenger_send grant enforcement', () => {
-  it('sends exactly once with a valid signed grant and reports sent', async () => {
+  it('sends exactly once with a valid signed grant and confirms delivery through one thread read', async () => {
     const input = sendInput();
-    const { conversations, calls } = fakeConversations('ok', input);
+    const { conversations, calls } = fakeConversations('ok', 'confirmed', input);
     const approvalGrant = vi.fn((request: ActionRequest) => buildGrant(input));
     const authorizer = new HmacGrantAuthorizer({ secret: SECRET });
     const handlers = register({ conversations, authorizer, approvalGrant });
@@ -129,7 +132,7 @@ describe('messenger_send grant enforcement', () => {
     expect(result.isError).toBe(false);
     expect(result.structuredContent).toEqual({ ok: true, backend: 'fixture', thread_id: input.thread_id, status: 'sent' });
     expect(calls.sendThread).toBe(1);
-    expect(calls.readThread).toBe(0);
+    expect(calls.readThread).toBe(1);
     expect(approvalGrant).toHaveBeenCalledTimes(1);
     expect(approvalGrant.mock.calls[0]?.[0]).toMatchObject({
       provider: 'facebook',
@@ -142,7 +145,7 @@ describe('messenger_send grant enforcement', () => {
 
   it('refuses a grant whose subject_digest was computed over a different message without sending', async () => {
     const input = sendInput();
-    const { conversations, calls } = fakeConversations('ok', input);
+    const { conversations, calls } = fakeConversations('ok', 'confirmed', input);
     const approvalGrant = vi.fn((request: ActionRequest) =>
       buildGrant(input, { subject_digest: subjectDigest({ ...input, message: 'A different message than the granted one.' }) }));
     const authorizer = new HmacGrantAuthorizer({ secret: SECRET });
@@ -156,11 +159,12 @@ describe('messenger_send grant enforcement', () => {
       error: { code: 'ACTION_FORBIDDEN', message: 'The presented grant does not authorize this action.' }
     });
     expect(calls.sendThread).toBe(0);
+    expect(calls.readThread).toBe(0);
   });
 
   it('consumes the grant on first use and refuses a replay of the same grant id without sending again', async () => {
     const input = sendInput();
-    const { conversations, calls } = fakeConversations('ok', input);
+    const { conversations, calls } = fakeConversations('ok', 'confirmed', input);
     const envelope = buildGrant(input);
     const approvalGrant = vi.fn(() => envelope);
     const authorizer = new HmacGrantAuthorizer({ secret: SECRET });
@@ -178,12 +182,13 @@ describe('messenger_send grant enforcement', () => {
     });
 
     expect(calls.sendThread).toBe(1);
+    expect(calls.readThread).toBe(1);
     expect(approvalGrant).toHaveBeenCalledTimes(2);
   });
 
   it('fails closed with APPROVAL_REQUIRED when the host seam is absent', async () => {
     const input = sendInput();
-    const { conversations, calls } = fakeConversations('ok', input);
+    const { conversations, calls } = fakeConversations('ok', 'confirmed', input);
     const authorizer = new HmacGrantAuthorizer({ secret: SECRET });
     const handlers = register({ conversations, authorizer });
 
@@ -195,11 +200,12 @@ describe('messenger_send grant enforcement', () => {
       error: { code: 'APPROVAL_REQUIRED', message: 'A valid approval grant is required for this action.' }
     });
     expect(calls.sendThread).toBe(0);
+    expect(calls.readThread).toBe(0);
   });
 
   it('fails closed with APPROVAL_REQUIRED when the host seam throws', async () => {
     const input = sendInput();
-    const { conversations, calls } = fakeConversations('ok', input);
+    const { conversations, calls } = fakeConversations('ok', 'confirmed', input);
     const approvalGrant = vi.fn(() => {
       throw new Error('approval channel unavailable');
     });
@@ -214,11 +220,12 @@ describe('messenger_send grant enforcement', () => {
       error: { code: 'APPROVAL_REQUIRED', message: 'A valid approval grant is required for this action.' }
     });
     expect(calls.sendThread).toBe(0);
+    expect(calls.readThread).toBe(0);
   });
 
   it('surfaces a session-invalid send as a standard provider failure without reconciling', async () => {
     const input = sendInput();
-    const { conversations, calls } = fakeConversations('session-invalid', input);
+    const { conversations, calls } = fakeConversations('session-invalid', 'confirmed', input);
     const approvalGrant = vi.fn(() => buildGrant(input));
     const authorizer = new HmacGrantAuthorizer({ secret: SECRET });
     const handlers = register({ conversations, authorizer, approvalGrant });
@@ -235,10 +242,57 @@ describe('messenger_send grant enforcement', () => {
   });
 });
 
+describe('messenger_send post-success delivery observation', () => {
+  it('reports a resolved send as unknown when the observation read finds no token in the thread', async () => {
+    const input = sendInput();
+    const { conversations, calls } = fakeConversations('ok', 'unconfirmed', input);
+    const approvalGrant = vi.fn(() => buildGrant(input));
+    const authorizer = new HmacGrantAuthorizer({ secret: SECRET });
+    const handlers = register({ conversations, authorizer, approvalGrant });
+
+    const result = await invoke(handlers, 'messenger_send', { ...input });
+
+    expect(result.isError).toBe(false);
+    expect(result.structuredContent).toEqual({ ok: true, backend: 'fixture', thread_id: input.thread_id, status: 'unknown' });
+    expect(calls.sendThread).toBe(1);
+    expect(calls.readThread).toBe(1);
+  });
+
+  it('reports a resolved send as unknown when the observation read fails, without resending', async () => {
+    const input = sendInput();
+    const { conversations, calls } = fakeConversations('ok', 'throws', input);
+    const approvalGrant = vi.fn(() => buildGrant(input));
+    const authorizer = new HmacGrantAuthorizer({ secret: SECRET });
+    const handlers = register({ conversations, authorizer, approvalGrant });
+
+    const result = await invoke(handlers, 'messenger_send', { ...input });
+
+    expect(result.isError).toBe(false);
+    expect(result.structuredContent).toEqual({ ok: true, backend: 'fixture', thread_id: input.thread_id, status: 'unknown' });
+    expect(calls.sendThread).toBe(1);
+    expect(calls.readThread).toBe(1);
+  });
+
+  it('reports a resolved send as unknown when the observation read returns no thread', async () => {
+    const input = sendInput();
+    const { conversations, calls } = fakeConversations('ok', 'null', input);
+    const approvalGrant = vi.fn(() => buildGrant(input));
+    const authorizer = new HmacGrantAuthorizer({ secret: SECRET });
+    const handlers = register({ conversations, authorizer, approvalGrant });
+
+    const result = await invoke(handlers, 'messenger_send', { ...input });
+
+    expect(result.isError).toBe(false);
+    expect(result.structuredContent).toEqual({ ok: true, backend: 'fixture', thread_id: input.thread_id, status: 'unknown' });
+    expect(calls.sendThread).toBe(1);
+    expect(calls.readThread).toBe(1);
+  });
+});
+
 describe('messenger_send timeout reconciliation', () => {
   it('reconciles a timed-out send as sent when the thread contains the idempotency token', async () => {
     const input = sendInput();
-    const { conversations, calls } = fakeConversations('timeout-confirmed', input);
+    const { conversations, calls } = fakeConversations('timeout', 'confirmed', input);
     const approvalGrant = vi.fn(() => buildGrant(input));
     const authorizer = new HmacGrantAuthorizer({ secret: SECRET });
     const handlers = register({ conversations, authorizer, approvalGrant });
@@ -253,7 +307,7 @@ describe('messenger_send timeout reconciliation', () => {
 
   it('reports a timed-out send as unknown when no thread message carries the token', async () => {
     const input = sendInput();
-    const { conversations, calls } = fakeConversations('timeout-unconfirmed', input);
+    const { conversations, calls } = fakeConversations('timeout', 'unconfirmed', input);
     const approvalGrant = vi.fn(() => buildGrant(input));
     const authorizer = new HmacGrantAuthorizer({ secret: SECRET });
     const handlers = register({ conversations, authorizer, approvalGrant });
@@ -268,7 +322,7 @@ describe('messenger_send timeout reconciliation', () => {
 
   it('reports a timed-out send as unknown when the reconciliation read itself times out', async () => {
     const input = sendInput();
-    const { conversations, calls } = fakeConversations('timeout-read-fails', input);
+    const { conversations, calls } = fakeConversations('timeout', 'throws', input);
     const approvalGrant = vi.fn(() => buildGrant(input));
     const authorizer = new HmacGrantAuthorizer({ secret: SECRET });
     const handlers = register({ conversations, authorizer, approvalGrant });
@@ -320,9 +374,59 @@ describe('messenger_send timeout reconciliation', () => {
   });
 });
 
+describe('messenger_send post-submit failure reconciliation', () => {
+  it('reconciles an upstream failure whose submit was triggered as sent when the observation finds the token', async () => {
+    const input = sendInput();
+    const { conversations, calls } = fakeConversations('submit-upstream', 'confirmed', input);
+    const approvalGrant = vi.fn(() => buildGrant(input));
+    const authorizer = new HmacGrantAuthorizer({ secret: SECRET });
+    const handlers = register({ conversations, authorizer, approvalGrant });
+
+    const result = await invoke(handlers, 'messenger_send', { ...input });
+
+    expect(result.isError).toBe(false);
+    expect(result.structuredContent).toEqual({ ok: true, backend: 'fixture', thread_id: input.thread_id, status: 'sent' });
+    expect(calls.sendThread).toBe(1);
+    expect(calls.readThread).toBe(1);
+  });
+
+  it('reconciles an upstream failure whose submit was triggered as unknown when the observation does not confirm the token', async () => {
+    const input = sendInput();
+    const { conversations, calls } = fakeConversations('submit-upstream', 'unconfirmed', input);
+    const approvalGrant = vi.fn(() => buildGrant(input));
+    const authorizer = new HmacGrantAuthorizer({ secret: SECRET });
+    const handlers = register({ conversations, authorizer, approvalGrant });
+
+    const result = await invoke(handlers, 'messenger_send', { ...input });
+
+    expect(result.isError).toBe(false);
+    expect(result.structuredContent).toEqual({ ok: true, backend: 'fixture', thread_id: input.thread_id, status: 'unknown' });
+    expect(calls.sendThread).toBe(1);
+    expect(calls.readThread).toBe(1);
+  });
+
+  it('keeps the provider failure shape when the send failed before the submit was triggered', async () => {
+    const input = sendInput();
+    const { conversations, calls } = fakeConversations('upstream', 'confirmed', input);
+    const approvalGrant = vi.fn(() => buildGrant(input));
+    const authorizer = new HmacGrantAuthorizer({ secret: SECRET });
+    const handlers = register({ conversations, authorizer, approvalGrant });
+
+    const result = await invoke(handlers, 'messenger_send', { ...input });
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toEqual({
+      ok: false,
+      error: { code: 'UPSTREAM_ERROR', message: 'The Facebook Messenger message could not be sent.' }
+    });
+    expect(calls.sendThread).toBe(1);
+    expect(calls.readThread).toBe(0);
+  });
+});
+
 describe('messenger_send registration', () => {
   it('fails registration when the conversation surface is configured without an authorizer', () => {
-    const { conversations } = fakeConversations('ok', sendInput());
+    const { conversations } = fakeConversations('ok', 'confirmed', sendInput());
     const { server } = captureHandlers();
 
     expect(() => registerMarketplaceTools(server, new FixtureBackend(), { error: vi.fn() }, { conversations }))
@@ -331,7 +435,7 @@ describe('messenger_send registration', () => {
 
   it('lists messenger_send only when the conversation surface is configured', async () => {
     const authorizer = new HmacGrantAuthorizer({ secret: SECRET });
-    const { conversations } = fakeConversations('ok', sendInput());
+    const { conversations } = fakeConversations('ok', 'confirmed', sendInput());
 
     const withSurface = captureHandlers();
     registerMarketplaceTools(withSurface.server, new FixtureBackend(), { error: vi.fn() }, { conversations, authorizer });

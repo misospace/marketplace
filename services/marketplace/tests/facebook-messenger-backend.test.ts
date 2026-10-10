@@ -3,7 +3,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer, type Server } from 'node:http';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
-import { chromium } from 'playwright';
+import { chromium, errors } from 'playwright';
+import type { Page } from 'playwright';
 import { BrowserSessionManager } from '../src/browser.js';
 import { ProviderError } from '../src/backend.js';
 import { FacebookSessionProbe } from '../src/facebook.js';
@@ -129,6 +130,44 @@ const sendInput = (overrides: Record<string, unknown> = {}) =>
     idempotency_token: 'tok-abc123def456ghij',
     ...overrides
   });
+
+// The serialized send task receives its page through the browser's runExclusive seam. Driving
+// that seam with a controlled page rejects one page operation in isolation — the composer
+// contract check (pre-Enter) or the Enter press (post-Enter) — without launching a real browser,
+// so these cases run even when Chromium is unavailable.
+function controlledMessengerPage(options: { composerCount: number; rejectPress?: unknown }): Record<string, unknown> {
+  const url = 'http://127.0.0.1/messages/t/1684432532/';
+  const threadPage = {
+    url,
+    signals: {
+      hasPasswordInput: false, hasLoginForm: false, hasCheckpointForm: false, hasCaptchaFrame: false,
+      hasMainLandmark: true, hasAuthenticatedMarker: true, hasLoginPrompt: false,
+      mentionsCheckpoint: false, mentionsCaptcha: false
+    },
+    messages: [{ sender: 'other', senderName: 'Synthetic Seller', text: 'Hello' }]
+  };
+  return {
+    goto: async () => undefined,
+    evaluate: async (_fn: unknown, arg: unknown) => {
+      const a = (arg ?? {}) as { selector?: unknown };
+      return a.selector !== undefined ? { url, composerCount: options.composerCount } : threadPage;
+    },
+    locator: () => ({ focus: async () => undefined }),
+    keyboard: {
+      type: async () => undefined,
+      press: async () => { if (options.rejectPress !== undefined) throw options.rejectPress; }
+    }
+  };
+}
+
+function driveSendWithPage(backend: FacebookMessengerBackend, page: Record<string, unknown>): void {
+  const manager = backend['browser'];
+  const implementation = (async (
+    signal: AbortSignal,
+    task: (page: Page, signal: AbortSignal) => Promise<never>
+  ) => task(page as unknown as Page, signal)) as unknown as typeof manager['runExclusive'];
+  vi.spyOn(manager, 'runExclusive').mockImplementation(implementation);
+}
 
 describe.skipIf(!browserAvailable)('Facebook Messenger backend', () => {
   it('lists threads from the isolated Messenger inbox and applies caller limits', async () => {
@@ -342,5 +381,45 @@ describe.skipIf(!browserAvailable)('Facebook Messenger backend send', () => {
     }
     controller.abort(reason);
     await expect(operation).rejects.toBe(reason);
+  });
+});
+
+// These cases drive the send task through the runExclusive page-seam with a controlled page, so
+// they need no real browser and run regardless of whether Chromium is available.
+describe('Facebook Messenger backend send submit-triggered metadata', () => {
+  it('tags a post-Enter failure with submit_triggered and maps its code to TIMEOUT', async () => {
+    configure();
+    const backend = createBackend();
+    vi.spyOn(backend['probe'], 'probeSession').mockResolvedValue({
+      status: 'session_usable', outcome: 'messages_authenticated'
+    });
+    // A present composer carries the task through the focus/type steps to the Enter press, which
+    // is rejected after submitTriggered has been set. The rejection is a Playwright timeout, so it
+    // must map to TIMEOUT and carry submit_triggered (never reported as a clean unsent failure).
+    driveSendWithPage(backend, controlledMessengerPage({
+      composerCount: 1,
+      rejectPress: new errors.TimeoutError('the Enter press failed after the submit was dispatched')
+    }));
+    const error = (await backend.sendThread(sendInput(), new AbortController().signal).catch((e) => e)) as ProviderError;
+    expect(error).toBeInstanceOf(ProviderError);
+    expect(error.code).toBe('TIMEOUT');
+    expect(error.message).toBe('The Facebook Messenger thread page did not load in time.');
+    expect(error.metadata.submit_triggered).toBe(true);
+  });
+
+  it('does not tag a pre-Enter composer classification failure with submit_triggered', async () => {
+    configure();
+    const backend = createBackend();
+    vi.spyOn(backend['probe'], 'probeSession').mockResolvedValue({
+      status: 'session_usable', outcome: 'messages_authenticated'
+    });
+    // An absent (count 0) composer rejects before any typing or Enter press, so the thrown error
+    // is the original pre-Enter upstream error and must carry no submit_triggered metadata.
+    driveSendWithPage(backend, controlledMessengerPage({ composerCount: 0 }));
+    const error = (await backend.sendThread(sendInput(), new AbortController().signal).catch((e) => e)) as ProviderError;
+    expect(error).toBeInstanceOf(ProviderError);
+    expect(error.code).toBe('UPSTREAM_ERROR');
+    expect(error.message).toBe('The Facebook Messenger message composer was not recognized.');
+    expect(error.metadata).not.toHaveProperty('submit_triggered');
   });
 });

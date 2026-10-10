@@ -223,6 +223,9 @@ export class FacebookMessengerBackend implements ConversationBackend {
       throw error;
     }
 
+    // Once the Enter press is dispatched the message may already be in flight, so any failure
+    // from that point on is tagged submit_triggered and must never be reported as unsent.
+    let submitTriggered = false;
     try {
       await this.browser.runExclusive(signal, async (page, taskSignal) => {
         await page.goto(threadUrl, {
@@ -264,20 +267,26 @@ export class FacebookMessengerBackend implements ConversationBackend {
         if (taskSignal.aborted) throw taskSignal.reason ?? new Error('Browser operation aborted');
         await page.keyboard.type(renderDeliveredMessage(input));
         if (taskSignal.aborted) throw taskSignal.reason ?? new Error('Browser operation aborted');
+        submitTriggered = true;
         await page.keyboard.press('Enter');
         if (taskSignal.aborted) throw taskSignal.reason ?? new Error('Browser operation aborted');
       });
     } catch (error) {
       if (signal.aborted) throw signal.reason ?? error;
+      const submitMetadata = submitTriggered ? { submit_triggered: true } : undefined;
       if (error instanceof errors.TimeoutError) {
-        throw new MarketplaceProviderError('TIMEOUT', 'The Facebook Messenger thread page did not load in time.');
+        throw new MarketplaceProviderError('TIMEOUT', 'The Facebook Messenger thread page did not load in time.', submitMetadata);
       }
-      if (error instanceof MarketplaceProviderError) throw error;
+      if (error instanceof MarketplaceProviderError) {
+        throw submitTriggered
+          ? new MarketplaceProviderError(error.code, error.message, { ...error.metadata, submit_triggered: true })
+          : error;
+      }
       if (error instanceof BrowserUnavailableError) {
-        throw new MarketplaceProviderError('UPSTREAM_ERROR', 'The browser session is not available.');
+        throw new MarketplaceProviderError('UPSTREAM_ERROR', 'The browser session is not available.', submitMetadata);
       }
       this.logger.error('Facebook Messenger send failed:', error instanceof Error ? error.name : 'UnknownError');
-      throw new MarketplaceProviderError('UPSTREAM_ERROR', 'The Facebook Messenger message could not be sent.');
+      throw new MarketplaceProviderError('UPSTREAM_ERROR', 'The Facebook Messenger message could not be sent.', submitMetadata);
     }
   }
 

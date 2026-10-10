@@ -93,7 +93,7 @@ const TOOLS = [
   },
   {
     name: 'messenger_send',
-    description: 'Send one approval-grant-bound message into a conversation thread. Requires a single-use signed approval grant; a timed-out send is reconciled by reading the thread for its idempotency token and is never resent.',
+    description: 'Send one approval-grant-bound message into a conversation thread. Requires a single-use signed approval grant. Delivery is confirmed by reading the thread for the idempotency token; unconfirmed sends are reported as unknown and are never resent.',
     inputSchema: threadSendInputSchema,
     outputSchema: sendOutputSchema,
     definition: { riskClass: 'send', scope: messengerScope }
@@ -252,16 +252,21 @@ export function registerMarketplaceTools(
           const conversations = options.conversations;
           if (!conversations) throw new ProviderError('UPSTREAM_ERROR', 'The messenger surface is not configured on this deployment.');
           const sendInput = parsed.data as ThreadSendInput;
+          // A DOM interaction succeeding is not delivery confirmation, so a resolved send is
+          // never reported 'sent' directly; a failure whose submit was already dispatched is
+          // likewise never reported as unsent. Both are reconciled with one thread read.
           try {
             await runBackendOperation((signal) => conversations.sendThread(sendInput, signal), backendTimeoutMs, extra.signal, shutdownSignal);
-            output = { ok: true, backend: backendName, thread_id: sendInput.thread_id, status: 'sent' };
           } catch (error) {
-            if (!(error instanceof ProviderError && error.code === 'TIMEOUT')) throw error;
-            // A timed-out send has an unknown outcome and is reconciled, never resent; any
-            // retry is a new approval decision for the host (provider-action-boundaries).
-            const delivered = await reconcileSentThread(conversations, sendInput, backendTimeoutMs, extra.signal, shutdownSignal);
-            output = { ok: true, backend: backendName, thread_id: sendInput.thread_id, status: delivered ? 'sent' : 'unknown' };
+            const reconcilable = error instanceof ProviderError
+              && (error.code === 'TIMEOUT' || error.metadata.submit_triggered === true);
+            if (!reconcilable) throw error;
           }
+          // The single observation reads the thread for the idempotency token bound to this
+          // grant; a missing token or a failed read yields 'unknown', and the message is never
+          // resent (provider-action-boundaries: any retry is a new approval decision).
+          const delivered = await reconcileSentThread(conversations, sendInput, backendTimeoutMs, extra.signal, shutdownSignal);
+          output = { ok: true, backend: backendName, thread_id: sendInput.thread_id, status: delivered ? 'sent' : 'unknown' };
         } else if (name === 'shopping_search') {
           const shopping = options.shopping;
           if (!shopping) throw new ProviderError('UPSTREAM_ERROR', 'The shopping surface is not configured on this deployment.');

@@ -14,6 +14,7 @@ import { backendNameSchema, SERVICE_VERSION } from './domain.js';
 import { BrowserSessionManager } from './browser.js';
 import { FACEBOOK_MESSENGER_PATH, FACEBOOK_ORIGIN, FacebookSessionProbe, toProviderSessionAssessment } from './facebook.js';
 import { DenyAllAuthorizer, HmacGrantAuthorizer, type ActionAuthorizer, type ActionRequest } from './authorization.js';
+import { FileGrantConsumptionStore, type GrantConsumptionStore } from './grant-state.js';
 import {
   FACEBOOK_LOGIN_WAIT_DEFAULT_MS,
   FacebookCredentialLogin,
@@ -75,10 +76,27 @@ export interface ServiceOptions {
   messengerReauthViewerPort?: number;
   /** Per-call host seam for approval grants; receives the validated action request (including the payload digest) so a host can correlate it with its own approval records. Grants must come from the host, never from tool arguments; this service does not issue grants. */
   approvalGrant?: (request: ActionRequest) => unknown;
-  /** Write-action authorizer for `send` tools. When omitted, the service installs the production HMAC grant verifier if a grant-issuer secret is configured (seam or GRANT_ISSUER_SECRET), otherwise the fail-closed deny-all authorizer. */
+  /**
+   * Write-action authorizer for `send` tools. When omitted, the service
+   * installs the production HMAC grant verifier when a non-empty grant-issuer
+   * secret (seam or GRANT_ISSUER_SECRET) is configured AND durable grant
+   * consumption state is available (the `grantConsumptionStore` seam or the
+   * GRANT_STATE_PATH directory); a configured secret without durable state
+   * installs the fail-closed deny-all authorizer (with one warning), as does a
+   * secret-less deployment.
+   */
   authorizer?: ActionAuthorizer;
   /** Shared grant-issuer secret seam for the production HMAC grant verifier; not an environment variable or tool input. Read at assembly time. */
   grantIssuerSecret?: string;
+  /**
+   * Durable single-use grant consumption state for the production HMAC grant
+   * verifier; not an environment variable or tool input. When omitted and
+   * GRANT_STATE_PATH names a directory, the service constructs a
+   * FileGrantConsumptionStore over that directory. The verifier's default
+   * in-memory state is process-local only; durable deployments must supply
+   * file-backed state.
+   */
+  grantConsumptionStore?: GrantConsumptionStore;
 }
 
 export interface MarketplaceService {
@@ -258,16 +276,34 @@ export function createMarketplaceService(options: ServiceOptions = {}): Marketpl
     ? undefined
     : createReauthAdminServer({ reauth: messengerReauth, port: messengerReauthAdminPort, logger });
 
-  // Write-action authorization is fail-closed. An explicitly supplied authorizer wins; otherwise
-  // the production HMAC grant verifier is installed when a grant-issuer secret is configured
-  // (via the seam or GRANT_ISSUER_SECRET, read here at assembly time rather than at module load),
-  // and the deny-all authorizer refuses every send otherwise. A set-but-invalid secret fails
-  // startup in the verifier constructor rather than silently weakening enforcement.
+  // Write-action authorization is fail-closed. An explicitly supplied authorizer wins;
+  // otherwise the production HMAC grant verifier is installed only when a grant-issuer
+  // secret is configured (via the seam or GRANT_ISSUER_SECRET, read here at assembly time
+  // rather than at module load) AND durable grant consumption state is available (via the
+  // grantConsumptionStore seam or the GRANT_STATE_PATH directory). The verifier's default
+  // in-memory state is process-local only, so a configured secret without durable state
+  // installs the deny-all authorizer and warns once rather than silently weakening
+  // single-use enforcement; a secret-less deployment installs the deny-all authorizer.
+  // A set-but-invalid secret fails startup in the verifier constructor.
   const grantIssuerSecret = options.grantIssuerSecret ?? process.env.GRANT_ISSUER_SECRET;
-  const authorizer: ActionAuthorizer = options.authorizer
-    ?? (grantIssuerSecret !== undefined && grantIssuerSecret !== ''
-      ? new HmacGrantAuthorizer({ secret: grantIssuerSecret })
-      : new DenyAllAuthorizer());
+  let authorizer: ActionAuthorizer;
+  if (options.authorizer !== undefined) {
+    authorizer = options.authorizer;
+  } else if (grantIssuerSecret !== undefined && grantIssuerSecret !== '') {
+    const grantStatePath = process.env.GRANT_STATE_PATH;
+    const durableStore: GrantConsumptionStore | undefined = options.grantConsumptionStore
+      ?? (grantStatePath !== undefined && grantStatePath !== ''
+        ? new FileGrantConsumptionStore({ dir: grantStatePath })
+        : undefined);
+    if (durableStore === undefined) {
+      console.warn('GRANT_ISSUER_SECRET is set but no durable grant consumption state (GRANT_STATE_PATH) is configured; write actions remain deny-all.');
+      authorizer = new DenyAllAuthorizer();
+    } else {
+      authorizer = new HmacGrantAuthorizer({ secret: grantIssuerSecret, store: durableStore });
+    }
+  } else {
+    authorizer = new DenyAllAuthorizer();
+  }
   const active = new Set<{ mcp: Server; transport: StreamableHTTPServerTransport }>();
   let shuttingDown = false;
   const shutdownController = new AbortController();

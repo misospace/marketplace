@@ -19,6 +19,8 @@ import * as packageEntry from '../src/index.js';
 import { runBackendOperation } from '../src/tools.js';
 import { threadsListInputSchema, threadReadInputSchema } from '../src/domain.js';
 import { FakeReauthRuntime } from './helpers/fake-reauth-runtime.js';
+import { UnverifiedGrantAuthorizer } from './helpers/unverified-grant-authorizer.js';
+import { InMemoryGrantConsumptionStore } from '../src/grant-state.js';
 import { canonicalActionInput, type ActionRequest, type ApprovalGrant, type SignedGrantEnvelope } from '../src/authorization.js';
 
 const packageVersion = JSON.parse(
@@ -318,7 +320,7 @@ describe('fixture MCP service', () => {
       'Fetch one product offer by canonical ID or URL from the configured shopping source. Read-only.',
       'List recent seller conversation threads from the Facebook Marketplace inbox. Read-only.',
       'Read the messages of one marketplace conversation thread by ID. Read-only, but opening the thread marks it "Seen" for the other participant.',
-      'Send one approval-grant-bound message into a conversation thread. Requires a single-use signed approval grant; a timed-out send is reconciled by reading the thread for its idempotency token and is never resent.'
+      'Send one approval-grant-bound message into a conversation thread. Requires a single-use signed approval grant. Delivery is confirmed by reading the thread for the idempotency token; unconfirmed sends are reported as unknown and are never resent.'
     ]);
     for (const tool of tools.tools) {
       expect(tool.outputSchema).toBeDefined();
@@ -1095,6 +1097,7 @@ describe('production authorizer and messenger reauth wiring', () => {
       port: 0,
       adminPort: 0,
       grantIssuerSecret: secret,
+      grantConsumptionStore: new InMemoryGrantConsumptionStore(),
       approvalGrant: (request) => signGrantFor(request, secret)
     });
     await packageEntry.listen(service);
@@ -1121,6 +1124,7 @@ describe('production authorizer and messenger reauth wiring', () => {
       port: 0,
       adminPort: 0,
       grantIssuerSecret: secret,
+      grantConsumptionStore: new InMemoryGrantConsumptionStore(),
       approvalGrant: (request) => {
         const presented: ApprovalGrant = {
           grant_id: `grant-${request.subjectDigest.slice(0, 16)}`,
@@ -1162,6 +1166,96 @@ describe('production authorizer and messenger reauth wiring', () => {
     expect(second.error.code).toBe('ACTION_FORBIDDEN');
     expect(second.error.message).toBe('The approval grant has already been used.');
     expect(structured(await client.callTool({ name: 'messenger_thread_read', arguments: { thread_id: sendInput.thread_id } })).messages).toHaveLength(3);
+  });
+
+  it('installs the HMAC verifier when a secret and the durable consumption store seam are configured', async () => {
+    await Promise.allSettled(clients.splice(0).map((client) => client.close()));
+    await service.close();
+    const secret = '0123456789abcdef0123456789abcdef0123456789abcdef';
+    service = createMarketplaceService({
+      host: '127.0.0.1',
+      port: 0,
+      adminPort: 0,
+      grantIssuerSecret: secret,
+      grantConsumptionStore: new InMemoryGrantConsumptionStore(),
+      approvalGrant: (request) => signGrantFor(request, secret)
+    });
+    await packageEntry.listen(service);
+    const address = service.address();
+    if (!address || typeof address === 'string') throw new Error('Expected a TCP address');
+    baseUrl = `http://127.0.0.1:${address.port}`;
+    const client = await connectClient();
+    const sendInput = { thread_id: 't-synth-0003', message: 'Durable consumption state engaged.', idempotency_token: 'idempotency-durable-store-0001' };
+    const sent = structured(await client.callTool({ name: 'messenger_send', arguments: sendInput }));
+    expect(sent).toEqual({ ok: true, backend: 'fixture', thread_id: sendInput.thread_id, status: 'sent' });
+    const thread = structured(await client.callTool({ name: 'messenger_thread_read', arguments: { thread_id: sendInput.thread_id } }));
+    expect(thread.messages.at(-1)).toEqual({ sender: 'you', text: 'Durable consumption state engaged. [idempotency-durable-store-0001]' });
+  });
+
+  it('refuses send with the deny-all authorizer and warns once when a secret is set without durable consumption state', async () => {
+    await Promise.allSettled(clients.splice(0).map((client) => client.close()));
+    await service.close();
+    const secret = '0123456789abcdef0123456789abcdef0123456789abcdef';
+    vi.stubEnv('GRANT_ISSUER_SECRET', secret);
+    vi.stubEnv('GRANT_STATE_PATH', '');
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      service = createMarketplaceService({ host: '127.0.0.1', port: 0, adminPort: 0 });
+      await packageEntry.listen(service);
+      const address = service.address();
+      if (!address || typeof address === 'string') throw new Error('Expected a TCP address');
+      baseUrl = `http://127.0.0.1:${address.port}`;
+      const client = await connectClient();
+      const refusal = structured(await client.callTool({ name: 'messenger_send', arguments: { thread_id: 't-synth-0001', message: 'No durable state configured.', idempotency_token: 'idempotency-no-state-0001' } }));
+      expect(refusal.ok).toBe(false);
+      expect(refusal.error.code).toBe('APPROVAL_REQUIRED');
+      expect(refusal.error.message).toBe('No approval authority is configured for write actions.');
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      const message = String(warnSpy.mock.calls[0]?.[0]);
+      expect(message).toBe('GRANT_ISSUER_SECRET is set but no durable grant consumption state (GRANT_STATE_PATH) is configured; write actions remain deny-all.');
+      expect(message).not.toContain(secret);
+    } finally {
+      warnSpy.mockRestore();
+      await service.close();
+    }
+  });
+
+  it('lets an explicit authorizer win even when a secret and GRANT_STATE_PATH are configured', async () => {
+    await Promise.allSettled(clients.splice(0).map((client) => client.close()));
+    await service.close();
+    const secret = '0123456789abcdef0123456789abcdef0123456789abcdef';
+    const stateDir = mkdtempSync(join(tmpdir(), 'marketplace-grant-state-path-'));
+    vi.stubEnv('GRANT_ISSUER_SECRET', secret);
+    vi.stubEnv('GRANT_STATE_PATH', stateDir);
+    try {
+      service = createMarketplaceService({
+        host: '127.0.0.1',
+        port: 0,
+        adminPort: 0,
+        authorizer: new UnverifiedGrantAuthorizer({ now: () => new Date('2098-01-01T00:00:00.000Z') }),
+        approvalGrant: (request) => ({
+          grant_id: `grant-${request.subjectDigest.slice(0, 16)}`,
+          provider: request.provider,
+          account: request.account,
+          surface: request.surface,
+          action: request.action,
+          subject_digest: request.subjectDigest,
+          expires_at: '2099-01-01T00:00:00.000Z'
+        })
+      });
+      await packageEntry.listen(service);
+      const address = service.address();
+      if (!address || typeof address === 'string') throw new Error('Expected a TCP address');
+      baseUrl = `http://127.0.0.1:${address.port}`;
+      const client = await connectClient();
+      const sendInput = { thread_id: 't-synth-0004', message: 'Explicit authorizer wins.', idempotency_token: 'idempotency-explicit-0001' };
+      // The unsigned grant is accepted, proving the explicit (non-HMAC) authorizer won.
+      const sent = structured(await client.callTool({ name: 'messenger_send', arguments: sendInput }));
+      expect(sent).toEqual({ ok: true, backend: 'fixture', thread_id: sendInput.thread_id, status: 'sent' });
+    } finally {
+      await service.close();
+      rmSync(stateDir, { recursive: true, force: true });
+    }
   });
 
   it('exposes a separate messenger reauth loop and admin port when Messenger is enabled for Facebook', async () => {

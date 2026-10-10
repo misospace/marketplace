@@ -12,6 +12,7 @@ import {
   HmacGrantAuthorizer,
   subjectDigest
 } from '../src/authorization.js';
+import type { GrantConsumptionStore } from '../src/grant-state.js';
 import { UnverifiedGrantAuthorizer } from './helpers/unverified-grant-authorizer.js';
 import { FixtureBackend } from '../src/backend.js';
 import { registerMarketplaceTools, assertWritableToolsHaveAuthorizer, TOOL_DEFINITIONS } from '../src/tools.js';
@@ -178,6 +179,28 @@ describe('hmac-signed approval grants', () => {
       ok: false,
       code: 'ACTION_FORBIDDEN',
       message: 'The approval grant has already been used.'
+    });
+  });
+
+  it('rejects a valid signed grant whose consumption store reports it as already claimed', () => {
+    const store: GrantConsumptionStore = { claim: () => false };
+    const verifier = new HmacGrantAuthorizer({ secret, now: () => fixedNow, store });
+
+    expect(verifier.authorize(request, sign(grant()))).toEqual({
+      ok: false,
+      code: 'ACTION_FORBIDDEN',
+      message: 'The approval grant has already been used.'
+    });
+  });
+
+  it('fails closed when the consumption store throws', () => {
+    const store: GrantConsumptionStore = { claim: () => { throw new Error('state backend down'); } };
+    const verifier = new HmacGrantAuthorizer({ secret, now: () => fixedNow, store });
+
+    expect(verifier.authorize(request, sign(grant()))).toEqual({
+      ok: false,
+      code: 'ACTION_FORBIDDEN',
+      message: 'Grant consumption state is unavailable.'
     });
   });
 

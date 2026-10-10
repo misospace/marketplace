@@ -180,7 +180,10 @@ export const runtimeErrorCodeSchema = z.enum([
 export const providerErrorMetadataSchema = z.object({
   action_required: z.string().min(1).max(MAX_PROVIDER_ACTION_LENGTH).optional(),
   login_url: httpUrlSchema.optional(),
-  retry_after: z.number().int().nonnegative().optional()
+  retry_after: z.number().int().nonnegative().optional(),
+  // True only when a send was interrupted after its submit (Enter) was dispatched, so the
+  // caller cannot categorically report the message as unsent.
+  submit_triggered: z.boolean().optional()
 }).strict();
 
 export const providerErrorSchema = z.object({
