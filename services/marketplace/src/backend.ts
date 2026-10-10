@@ -3,6 +3,7 @@ import {
   fetchInputSchema,
   threadsListInputSchema,
   threadReadInputSchema,
+  threadSendInputSchema,
   shoppingFetchInputSchema,
   shoppingSearchInputSchema,
   providerErrorMetadataSchema,
@@ -14,7 +15,8 @@ import {
   type ConversationThreadMessages,
   type ProductOffer,
   type ProviderErrorCode,
-  type ProviderErrorMetadata
+  type ProviderErrorMetadata,
+  type ThreadSendInput
 } from './domain.js';
 import { FIXTURE_CONVERSATIONS, FIXTURE_LISTINGS } from './fixtures.js';
 
@@ -28,6 +30,7 @@ export interface ConversationBackend {
   readonly name: string;
   listThreads(input: ReturnType<typeof threadsListInputSchema.parse>, signal: AbortSignal): Promise<ConversationThread[]> | ConversationThread[];
   readThread(input: ReturnType<typeof threadReadInputSchema.parse>, signal: AbortSignal): Promise<ConversationThreadMessages | null> | ConversationThreadMessages | null;
+  sendThread(input: ReturnType<typeof threadSendInputSchema.parse>, signal: AbortSignal): Promise<void> | void;
 }
 
 // Cross-site shopping surface (#48). HTTP-API-backed, no browser session; `name` is the
@@ -53,8 +56,16 @@ export class ProviderError extends Error {
   }
 }
 
+// The delivery form that binds the grant's idempotency token into the delivered text, so a
+// timed-out send can be reconciled against the thread (matched by the token substring).
+export function renderDeliveredMessage(input: ThreadSendInput): string {
+  return `${input.message} [${input.idempotency_token}]`;
+}
+
 export class FixtureBackend implements MarketplaceBackend, ConversationBackend {
   readonly name = 'fixture';
+  // Per-instance store of messages 'you' sent through sendThread; fixture data is never mutated.
+  private readonly sentMessages = new Map<string, ConversationMessage[]>();
 
   constructor(private readonly listings: readonly Listing[] = FIXTURE_LISTINGS) {}
 
@@ -86,11 +97,18 @@ export class FixtureBackend implements MarketplaceBackend, ConversationBackend {
 
   readThread(input: ReturnType<typeof threadReadInputSchema.parse>, _signal: AbortSignal): ConversationThreadMessages | null {
     const conversation = FIXTURE_CONVERSATIONS.find(({ thread }) => thread.thread_id === input.thread_id);
-    if (!conversation) return null;
+    const sent = this.sentMessages.get(input.thread_id);
+    if (!conversation && !sent) return null;
     return {
-      thread_id: conversation.thread.thread_id,
-      messages: conversation.messages
+      thread_id: input.thread_id,
+      messages: [...(conversation?.messages ?? []), ...(sent ?? [])]
     };
+  }
+
+  sendThread(input: ReturnType<typeof threadSendInputSchema.parse>, _signal: AbortSignal): void {
+    const messages = this.sentMessages.get(input.thread_id) ?? [];
+    messages.push({ sender: 'you' as const, text: renderDeliveredMessage(input) });
+    this.sentMessages.set(input.thread_id, messages);
   }
 }
 

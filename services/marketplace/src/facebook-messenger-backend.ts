@@ -1,10 +1,11 @@
 import { errors } from 'playwright';
 import { BrowserSessionManager, BrowserUnavailableError, sleepUntilAbort } from './browser.js';
 import type { ConversationBackend } from './backend.js';
-import { ProviderError as MarketplaceProviderError } from './backend.js';
+import { ProviderError as MarketplaceProviderError, renderDeliveredMessage } from './backend.js';
 import {
   threadsListInputSchema,
   threadReadInputSchema,
+  threadSendInputSchema,
   type ConversationThread,
   type ConversationThreadMessages,
   type ProviderErrorCode
@@ -12,6 +13,9 @@ import {
 import {
   extractMessengerInboxPage,
   extractMessengerThreadPage,
+  MESSENGER_COMPOSER_SELECTOR,
+  findMessengerComposer,
+  classifyMessengerComposerCount,
   MESSENGER_EXTRACT_LIMITS,
   type ExtractedInboxPage,
   type ExtractedThreadPage
@@ -200,6 +204,96 @@ export class FacebookMessengerBackend implements ConversationBackend {
     const outcome = interpretMessengerThreadPage({ page: extracted, baseUrl: this.probe.baseUrl, threadId: input.thread_id });
     if (outcome.kind === 'error') throw new MarketplaceProviderError(outcome.code, outcome.message);
     return { thread_id: input.thread_id, messages: [...outcome.messages] };
+  }
+
+  async sendThread(
+    input: ReturnType<typeof threadSendInputSchema.parse>,
+    signal: AbortSignal
+  ): Promise<void> {
+    if (signal.aborted) throw signal.reason ?? new Error('Browser operation aborted');
+    await this.ensureUsableSession(signal);
+
+    let threadUrl: string;
+    try {
+      threadUrl = assertFacebookOrigin(buildMessengerThreadUrl({ baseUrl: this.probe.baseUrl, threadId: input.thread_id }));
+    } catch (error) {
+      if (error instanceof TypeError) {
+        throw new MarketplaceProviderError('UPSTREAM_ERROR', 'The requested Facebook Messenger thread id is invalid.');
+      }
+      throw error;
+    }
+
+    // Once the Enter press is dispatched the message may already be in flight, so any failure
+    // from that point on is tagged submit_triggered and must never be reported as unsent.
+    let submitTriggered = false;
+    try {
+      await this.browser.runExclusive(signal, async (page, taskSignal) => {
+        await page.goto(threadUrl, {
+          waitUntil: 'domcontentloaded',
+          timeout: this.navigationTimeoutMs,
+          signal: taskSignal
+        });
+
+        // Verify the page is a recognized thread conversation before typing anything. A page
+        // that cannot be recognized as a thread is an upstream error and is never typed into.
+        const extractOptions = { limits: MESSENGER_EXTRACT_LIMITS };
+        let pageKind = classifyMessengerThreadPage(await page.evaluate(extractMessengerThreadPage, extractOptions));
+        const deadline = Date.now() + this.settleTimeoutMs;
+        while (pageKind === 'unknown' && Date.now() < deadline && !taskSignal.aborted) {
+          await sleepUntilAbort(200, taskSignal);
+          if (!taskSignal.aborted) {
+            pageKind = classifyMessengerThreadPage(await page.evaluate(extractMessengerThreadPage, extractOptions));
+          }
+        }
+        if (taskSignal.aborted) throw taskSignal.reason ?? new Error('Browser operation aborted');
+        if (pageKind !== 'messages') {
+          throw new MarketplaceProviderError('UPSTREAM_ERROR', 'The Facebook Messenger thread could not be verified before sending.');
+        }
+
+        // Recognize exactly one contract composer. An absent or ambiguous composer is an
+        // upstream error so the message is never typed into an unrecognized page.
+        const composer = await page.evaluate(findMessengerComposer, { selector: MESSENGER_COMPOSER_SELECTOR });
+        if (taskSignal.aborted) throw taskSignal.reason ?? new Error('Browser operation aborted');
+        if (classifyMessengerComposerCount(composer.composerCount) !== 'present') {
+          throw new MarketplaceProviderError('UPSTREAM_ERROR', 'The Facebook Messenger message composer was not recognized.');
+        }
+
+        // Focus the composer with the same contract selector, type the rendered message (the message
+        // plus the idempotency token bound by renderDeliveredMessage), and submit it with Enter. The
+        // focus accepts a signal; keyboard calls have no signal in Playwright 1.64, so each await is
+        // guarded by an explicit abort check. The serialized session also races the task against the
+        // abort signal, so a cancelled send never completes.
+        await page.locator(MESSENGER_COMPOSER_SELECTOR).focus({ signal: taskSignal });
+        if (taskSignal.aborted) throw taskSignal.reason ?? new Error('Browser operation aborted');
+        await page.keyboard.type(renderDeliveredMessage(input));
+        if (taskSignal.aborted) throw taskSignal.reason ?? new Error('Browser operation aborted');
+        submitTriggered = true;
+        await page.keyboard.press('Enter');
+        if (taskSignal.aborted) throw taskSignal.reason ?? new Error('Browser operation aborted');
+      });
+    } catch (error) {
+      if (signal.aborted) throw signal.reason ?? error;
+      const submitMetadata = submitTriggered ? { submit_triggered: true } : undefined;
+      if (error instanceof errors.TimeoutError) {
+        // A timeout after the Enter press means the send itself did not complete, not that the
+        // page failed to load.
+        throw new MarketplaceProviderError(
+          'TIMEOUT',
+          submitTriggered ? 'The Messenger send did not complete in time.' : 'The Facebook Messenger thread page did not load in time.',
+          submitMetadata
+        );
+      }
+      if (error instanceof MarketplaceProviderError) {
+        throw submitTriggered
+          ? new MarketplaceProviderError(error.code, error.message, { ...error.metadata, submit_triggered: true })
+          : error;
+      }
+      if (error instanceof BrowserUnavailableError) {
+        throw new MarketplaceProviderError('UPSTREAM_ERROR', 'The browser session is not available.', submitMetadata);
+      }
+      this.logger.error('Facebook Messenger send failed:', error instanceof Error ? error.name : 'UnknownError');
+      throw new MarketplaceProviderError('UPSTREAM_ERROR', 'The Facebook Messenger message could not be sent.', submitMetadata);
+    }
   }
 
   private async ensureUsableSession(signal: AbortSignal): Promise<void> {

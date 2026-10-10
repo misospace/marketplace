@@ -159,6 +159,16 @@ export const threadReadInputSchema = z.object({
 export type ThreadsListInput = z.infer<typeof threadsListInputSchema>;
 export type ThreadReadInput = z.infer<typeof threadReadInputSchema>;
 
+// Messenger send contract (#63). The idempotency token is embedded in the sent message so a
+// timed-out send can be reconciled against the thread before any retry (never resent blindly).
+export const threadSendInputSchema = z.object({
+  thread_id: conversationThreadIdSchema,
+  message: z.string().min(1).max(2000).regex(/^[^\u0000-\u001F\u007F]+$/, 'message must not contain control characters'),
+  idempotency_token: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$/)
+}).strict();
+
+export type ThreadSendInput = z.infer<typeof threadSendInputSchema>;
+
 export const runtimeErrorCodeSchema = z.enum([
   ...PROVIDER_ERROR_CODES,
   'NOT_FOUND',
@@ -170,7 +180,10 @@ export const runtimeErrorCodeSchema = z.enum([
 export const providerErrorMetadataSchema = z.object({
   action_required: z.string().min(1).max(MAX_PROVIDER_ACTION_LENGTH).optional(),
   login_url: httpUrlSchema.optional(),
-  retry_after: z.number().int().nonnegative().optional()
+  retry_after: z.number().int().nonnegative().optional(),
+  // True only when a send was interrupted after its submit (Enter) was dispatched, so the
+  // caller cannot categorically report the message as unsent.
+  submit_triggered: z.boolean().optional()
 }).strict();
 
 export const providerErrorSchema = z.object({
@@ -250,6 +263,20 @@ export const threadReadOutputSchema = z.union([
   }).strict(),
   runtimeFailureSchema
 ]);
+
+// 'sent' means delivered or reconciled-confirmed; 'unknown' means the outcome was never
+// confirmed after a timeout. Unconfirmed sends are reported as unknown, not as failure
+// or success (provider-action-boundaries: timeout and resend semantics).
+export const sendDeliveryStatusSchema = z.enum(['sent', 'unknown']);
+
+export const sendSuccessSchema = z.object({
+  ok: z.literal(true),
+  backend: backendNameSchema,
+  thread_id: conversationThreadIdSchema,
+  status: sendDeliveryStatusSchema
+}).strict();
+
+export const sendOutputSchema = z.union([sendSuccessSchema, runtimeFailureSchema]);
 export type RuntimeFailure = z.infer<typeof runtimeFailureSchema>;
 export type ProviderErrorCode = typeof PROVIDER_ERROR_CODES[number];
 export type ProviderErrorMetadata = z.infer<typeof providerErrorMetadataSchema>;

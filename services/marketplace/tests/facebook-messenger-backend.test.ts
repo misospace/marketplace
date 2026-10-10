@@ -3,13 +3,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer, type Server } from 'node:http';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
-import { chromium } from 'playwright';
+import { chromium, errors } from 'playwright';
+import type { Page } from 'playwright';
 import { BrowserSessionManager } from '../src/browser.js';
 import { ProviderError } from '../src/backend.js';
 import { FacebookSessionProbe } from '../src/facebook.js';
 import { FacebookCredentialLogin } from '../src/facebook-login.js';
 import { FacebookMessengerBackend } from '../src/facebook-messenger-backend.js';
-import { threadsListInputSchema, threadReadInputSchema } from '../src/domain.js';
+import { threadsListInputSchema, threadReadInputSchema, threadSendInputSchema } from '../src/domain.js';
 
 const browserAvailable = existsSync(chromium.executablePath());
 if (!browserAvailable && process.env.REQUIRE_BROWSER_TESTS === '1') {
@@ -19,7 +20,8 @@ if (!browserAvailable && process.env.REQUIRE_BROWSER_TESTS === '1') {
 const fixtureDir = new URL('./fixtures/facebook-messenger/', import.meta.url);
 const fixtures = new Map([
   'inbox-normal.html', 'inbox-empty.html', 'inbox-login.html', 'inbox-checkpoint.html', 'inbox-layout-changed.html',
-  'thread-normal.html', 'thread-layout-changed.html'
+  'thread-normal.html', 'thread-layout-changed.html',
+  'thread-composer.html', 'thread-no-composer.html', 'thread-two-composers.html'
 ].map((name) => [name, readFileSync(new URL(name, fixtureDir), 'utf8')]));
 
 let server: Server;
@@ -27,6 +29,7 @@ let origin: string;
 let inboxFixture = 'inbox-normal.html';
 let threadFixture = 'thread-normal.html';
 let hangInbox = false;
+let hangThread = false;
 let inboxRedirectTarget: string | undefined;
 let threadRedirectTarget: string | undefined;
 const requests: string[] = [];
@@ -38,6 +41,7 @@ beforeAll(async () => {
     const pathname = new URL(request.url ?? '/', 'http://127.0.0.1').pathname;
     requests.push(request.url ?? pathname);
     if (hangInbox && pathname === '/marketplace/inbox/') return;
+    if (hangThread && /^\/messages\/t\/[A-Za-z0-9._-]+\/$/.test(pathname)) return;
     // Redirect hooks simulate Facebook canonicalizing or moving an address; the redirect target
     // is served by the ordinary route table so only the URL assertion can tell the difference.
     if (inboxRedirectTarget && pathname === '/marketplace/inbox/') {
@@ -79,14 +83,16 @@ afterEach(async () => {
   inboxFixture = 'inbox-normal.html';
   threadFixture = 'thread-normal.html';
   hangInbox = false;
+  hangThread = false;
   inboxRedirectTarget = undefined;
   threadRedirectTarget = undefined;
 });
 
-function configure(nextInbox = 'inbox-normal.html', nextThread = 'thread-normal.html', nextHangInbox = false): void {
+function configure(nextInbox = 'inbox-normal.html', nextThread = 'thread-normal.html', nextHangInbox = false, nextHangThread = false): void {
   inboxFixture = nextInbox;
   threadFixture = nextThread;
   hangInbox = nextHangInbox;
+  hangThread = nextHangThread;
   requests.length = 0;
 }
 
@@ -116,6 +122,51 @@ const listInput = (overrides: Record<string, unknown> = {}) => threadsListInputS
 const readInput = (threadId = '1684432532') => threadReadInputSchema.parse({ thread_id: threadId });
 function expectProviderError(promise: Promise<unknown>, code: ProviderError['code'], message?: string) {
   return expect(promise).rejects.toMatchObject({ name: 'ProviderError', code, ...(message ? { message } : {}) });
+}
+const sendInput = (overrides: Record<string, unknown> = {}) =>
+  threadSendInputSchema.parse({
+    thread_id: '1684432532',
+    message: 'Is the blue desk still available?',
+    idempotency_token: 'tok-abc123def456ghij',
+    ...overrides
+  });
+
+// The serialized send task receives its page through the browser's runExclusive seam. Driving
+// that seam with a controlled page rejects one page operation in isolation — the composer
+// contract check (pre-Enter) or the Enter press (post-Enter) — without launching a real browser,
+// so these cases run even when Chromium is unavailable.
+function controlledMessengerPage(options: { composerCount: number; rejectPress?: unknown }): Record<string, unknown> {
+  const url = 'http://127.0.0.1/messages/t/1684432532/';
+  const threadPage = {
+    url,
+    signals: {
+      hasPasswordInput: false, hasLoginForm: false, hasCheckpointForm: false, hasCaptchaFrame: false,
+      hasMainLandmark: true, hasAuthenticatedMarker: true, hasLoginPrompt: false,
+      mentionsCheckpoint: false, mentionsCaptcha: false
+    },
+    messages: [{ sender: 'other', senderName: 'Synthetic Seller', text: 'Hello' }]
+  };
+  return {
+    goto: async () => undefined,
+    evaluate: async (_fn: unknown, arg: unknown) => {
+      const a = (arg ?? {}) as { selector?: unknown };
+      return a.selector !== undefined ? { url, composerCount: options.composerCount } : threadPage;
+    },
+    locator: () => ({ focus: async () => undefined }),
+    keyboard: {
+      type: async () => undefined,
+      press: async () => { if (options.rejectPress !== undefined) throw options.rejectPress; }
+    }
+  };
+}
+
+function driveSendWithPage(backend: FacebookMessengerBackend, page: Record<string, unknown>): void {
+  const manager = backend['browser'];
+  const implementation = (async (
+    signal: AbortSignal,
+    task: (page: Page, signal: AbortSignal) => Promise<never>
+  ) => task(page as unknown as Page, signal)) as unknown as typeof manager['runExclusive'];
+  vi.spyOn(manager, 'runExclusive').mockImplementation(implementation);
 }
 
 describe.skipIf(!browserAvailable)('Facebook Messenger backend', () => {
@@ -261,5 +312,114 @@ describe.skipIf(!browserAvailable)('Facebook Messenger backend', () => {
     expect(() => new FacebookMessengerBackend({ browser: {} as BrowserSessionManager, probe: {} as FacebookSessionProbe })).toThrow(TypeError);
     expect(() => new FacebookMessengerBackend({ browser: managers.at(-1)!, probe: new FacebookSessionProbe({ browser: managers.at(-1)!, baseUrl: origin }), maxThreads: 0 })).toThrow(RangeError);
     expect(() => new FacebookMessengerBackend({ browser: managers.at(-1)!, probe: new FacebookSessionProbe({ browser: managers.at(-1)!, baseUrl: origin }), inboxPath: '//elsewhere.invalid/' })).toThrow(TypeError);
+  });
+});
+
+describe.skipIf(!browserAvailable)('Facebook Messenger backend send', () => {
+  it('sends into the recognized composer and the typed text is observable on the page', async () => {
+    configure(undefined, 'thread-composer.html');
+    const backend = createBackend();
+    await backend.sendThread(sendInput(), new AbortController().signal);
+    // Re-navigate with the same persistent profile; the fixture mirrors the last sent text
+    // into a hidden input from persistent storage. That hidden value is the page-side signal
+    // that the typed text reached the page (no content is read out of the send itself).
+    const manager = backend['browser'];
+    const lastSent = await manager.runExclusive(new AbortController().signal, async (page) => {
+      await page.goto(`${origin}/messages/t/1684432532/`, { waitUntil: 'domcontentloaded' });
+      return page.evaluate(() => (document.getElementById('last-sent') as HTMLInputElement | null)?.value ?? '');
+    });
+    expect(lastSent).toBe('Is the blue desk still available? [tok-abc123def456ghij]');
+  });
+
+  it('fails closed with the composer error when no contract composer is present', async () => {
+    configure(undefined, 'thread-no-composer.html');
+    const backend = createBackend();
+    await expectProviderError(
+      backend.sendThread(sendInput(), new AbortController().signal),
+      'UPSTREAM_ERROR',
+      'The Facebook Messenger message composer was not recognized.'
+    );
+  });
+
+  it('fails closed with the composer error when two composers make it ambiguous', async () => {
+    configure(undefined, 'thread-two-composers.html');
+    const backend = createBackend();
+    await expectProviderError(
+      backend.sendThread(sendInput(), new AbortController().signal),
+      'UPSTREAM_ERROR',
+      'The Facebook Messenger message composer was not recognized.'
+    );
+  });
+
+  it('fails closed before typing when the thread page is not a recognized thread page', async () => {
+    configure(undefined, 'thread-layout-changed.html');
+    const backend = createBackend({ settleTimeoutMs: 200 });
+    await expectProviderError(
+      backend.sendThread(sendInput(), new AbortController().signal),
+      'UPSTREAM_ERROR',
+      'The Facebook Messenger thread could not be verified before sending.'
+    );
+  });
+
+  it('maps a hanging thread navigation to TIMEOUT', async () => {
+    configure(undefined, 'thread-composer.html', false, true);
+    const backend = createBackend();
+    await expectProviderError(backend.sendThread(sendInput(), new AbortController().signal), 'TIMEOUT');
+  }, 10_000);
+
+  it('rejects with the exact abort reason when aborted during a send', async () => {
+    // The unknown layout keeps the pre-send settle loop running, giving the abort a reliable
+    // window to land while the serialized browser operation is still in flight.
+    configure(undefined, 'thread-layout-changed.html');
+    const backend = createBackend({ settleTimeoutMs: 200 });
+    const controller = new AbortController();
+    const reason = new Error('cancel Messenger send');
+    const operation = backend.sendThread(sendInput(), controller.signal);
+    const deadline = Date.now() + 5_000;
+    while (!requests.includes('/messages/t/1684432532/') && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    controller.abort(reason);
+    await expect(operation).rejects.toBe(reason);
+  });
+});
+
+// These cases drive the send task through the runExclusive page-seam with a controlled page, so
+// they need no real browser and run regardless of whether Chromium is available.
+describe('Facebook Messenger backend send submit-triggered metadata', () => {
+  it('tags a post-Enter failure with submit_triggered and maps its code to TIMEOUT', async () => {
+    configure();
+    const backend = createBackend();
+    vi.spyOn(backend['probe'], 'probeSession').mockResolvedValue({
+      status: 'session_usable', outcome: 'messages_authenticated'
+    });
+    // A present composer carries the task through the focus/type steps to the Enter press, which
+    // is rejected after submitTriggered has been set. The rejection is a Playwright timeout, so it
+    // must map to TIMEOUT and carry submit_triggered (never reported as a clean unsent failure).
+    driveSendWithPage(backend, controlledMessengerPage({
+      composerCount: 1,
+      rejectPress: new errors.TimeoutError('the Enter press failed after the submit was dispatched')
+    }));
+    const error = (await backend.sendThread(sendInput(), new AbortController().signal).catch((e) => e)) as ProviderError;
+    expect(error).toBeInstanceOf(ProviderError);
+    expect(error.code).toBe('TIMEOUT');
+    expect(error.message).toBe('The Messenger send did not complete in time.');
+    expect(error.metadata.submit_triggered).toBe(true);
+  });
+
+  it('does not tag a pre-Enter composer classification failure with submit_triggered', async () => {
+    configure();
+    const backend = createBackend();
+    vi.spyOn(backend['probe'], 'probeSession').mockResolvedValue({
+      status: 'session_usable', outcome: 'messages_authenticated'
+    });
+    // An absent (count 0) composer rejects before any typing or Enter press, so the thrown error
+    // is the original pre-Enter upstream error and must carry no submit_triggered metadata.
+    driveSendWithPage(backend, controlledMessengerPage({ composerCount: 0 }));
+    const error = (await backend.sendThread(sendInput(), new AbortController().signal).catch((e) => e)) as ProviderError;
+    expect(error).toBeInstanceOf(ProviderError);
+    expect(error.code).toBe('UPSTREAM_ERROR');
+    expect(error.message).toBe('The Facebook Messenger message composer was not recognized.');
+    expect(error.metadata).not.toHaveProperty('submit_triggered');
   });
 });

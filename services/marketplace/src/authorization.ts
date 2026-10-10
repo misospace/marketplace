@@ -1,5 +1,6 @@
-import { createHash } from 'node:crypto';
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
+import { InMemoryGrantConsumptionStore, type GrantConsumptionStore } from './grant-state.js';
 
 export const ACTION_RISK_CLASSES = ['read', 'prepare', 'send', 'high_consequence'] as const;
 export type ActionRiskClass = typeof ACTION_RISK_CLASSES[number];
@@ -26,6 +27,15 @@ export const approvalGrantSchema = z.object({
 }).strict();
 
 export type ApprovalGrant = z.infer<typeof approvalGrantSchema>;
+
+export const signedGrantEnvelopeSchema = z
+  .object({
+    grant: approvalGrantSchema,
+    signature: z.string().regex(/^[0-9a-f]{64}$/)
+  })
+  .strict();
+
+export type SignedGrantEnvelope = z.infer<typeof signedGrantEnvelopeSchema>;
 
 export function canonicalActionInput(value: unknown): string {
   if (value === null) return 'null';
@@ -64,6 +74,89 @@ export class DenyAllAuthorizer implements ActionAuthorizer {
       code: 'APPROVAL_REQUIRED',
       message: 'No approval authority is configured for write actions.'
     };
+  }
+}
+
+function constantTimeEqual(a: string, b: string): boolean {
+  const left = Buffer.from(a, 'utf8');
+  const right = Buffer.from(b, 'utf8');
+  return left.length === right.length && timingSafeEqual(left, right);
+}
+
+export class HmacGrantAuthorizer implements ActionAuthorizer {
+  private readonly secret: string;
+  private readonly store: GrantConsumptionStore;
+  private readonly now: () => Date;
+
+  constructor(options: {
+    readonly secret: string;
+    readonly now?: () => Date;
+    /**
+     * Single-use grant consumption state. The default in-memory store is
+     * process-local only: a consumed grant would be replayable after a
+     * restart or on a second replica. Durable deployments must pass a file
+     * store.
+     */
+    readonly store?: GrantConsumptionStore;
+  }) {
+    if (typeof options.secret !== 'string' || options.secret.length < 32) {
+      throw new TypeError('secret must be a string of at least 32 characters');
+    }
+    this.secret = options.secret;
+    this.store = options.store ?? new InMemoryGrantConsumptionStore();
+    this.now = options.now ?? (() => new Date());
+  }
+
+  authorize(request: ActionRequest, grant: unknown): AuthorizationDecision {
+    const parsed = signedGrantEnvelopeSchema.safeParse(grant);
+    if (!parsed.success) {
+      return {
+        ok: false,
+        code: 'APPROVAL_REQUIRED',
+        message: 'A valid approval grant is required for this action.'
+      };
+    }
+
+    const envelope = parsed.data;
+    const expected = createHmac('sha256', this.secret)
+      .update(canonicalActionInput(envelope.grant), 'utf8')
+      .digest('hex');
+    if (!constantTimeEqual(expected, envelope.signature)) {
+      return {
+        ok: false,
+        code: 'ACTION_FORBIDDEN',
+        message: 'The presented grant does not carry a valid issuer signature.'
+      };
+    }
+
+    if (
+      envelope.grant.provider !== request.provider ||
+      envelope.grant.account !== request.account ||
+      envelope.grant.surface !== request.surface ||
+      envelope.grant.action !== request.action ||
+      envelope.grant.subject_digest !== request.subjectDigest
+    ) {
+      return {
+        ok: false,
+        code: 'ACTION_FORBIDDEN',
+        message: 'The presented grant does not authorize this action.'
+      };
+    }
+
+    if (Date.parse(envelope.grant.expires_at) <= this.now().getTime()) {
+      return { ok: false, code: 'ACTION_FORBIDDEN', message: 'The approval grant has expired.' };
+    }
+
+    let claimed: boolean;
+    try {
+      claimed = this.store.claim(envelope.grant.grant_id, Date.parse(envelope.grant.expires_at));
+    } catch {
+      return { ok: false, code: 'ACTION_FORBIDDEN', message: 'Grant consumption state is unavailable.' };
+    }
+    if (!claimed) {
+      return { ok: false, code: 'ACTION_FORBIDDEN', message: 'The approval grant has already been used.' };
+    }
+    return { ok: true };
   }
 }
 
