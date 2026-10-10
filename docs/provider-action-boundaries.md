@@ -1,6 +1,6 @@
 # Provider action boundaries
 
-The enforceable contract for account/session isolation and action authorization, defined before any write-capable MCP tool ships. Scope: Musebridge (this repository) enforces the boundary; Miso — via OpenClaw — owns the decisions and approvals that produce it. This document is the reference for #43 (seller messaging) and every capability after it.
+The enforceable contract for account/session isolation and action authorization, defined before any write-capable MCP tool ships. Scope: Musebridge (this repository) enforces the boundary; Miso — via OpenClaw — owns the decisions and approvals that produce it. This document is the reference for #43 (seller messaging) and every capability after it. The consolidated cross-capability inventory and integration-path decision record is [`capability-inventory.md`](capability-inventory.md) (#39); this document remains authoritative for risk classes and approval enforcement.
 
 Non-goals: this is not a generic policy framework, there is no rule engine, no config-driven permissions, and no shared package extraction. The enforcement surface is one gate at the tool-dispatch choke point and one grant verifier. If a future capability needs more, extend this document and the gate deliberately — do not grow a framework opportunistically.
 

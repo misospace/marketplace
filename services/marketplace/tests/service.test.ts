@@ -1,5 +1,5 @@
 import { createServer as createHttpServer, request as httpRequest } from 'node:http';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -18,6 +18,10 @@ import * as packageEntry from '../src/index.js';
 import { runBackendOperation } from '../src/tools.js';
 import { threadsListInputSchema, threadReadInputSchema } from '../src/domain.js';
 import { FakeReauthRuntime } from './helpers/fake-reauth-runtime.js';
+
+const packageVersion = JSON.parse(
+  readFileSync(new URL('../package.json', import.meta.url), 'utf8')
+).version as string;
 
 let service: MarketplaceService;
 let baseUrl: string;
@@ -299,7 +303,7 @@ describe('fixture MCP service', () => {
 
   it('supports SDK initialize, list tools, calls, and validates declared schemas', async () => {
     const client = await connectClient();
-    expect(client.getServerVersion()).toEqual({ name: 'marketplace', version: '0.1.0' });
+    expect(client.getServerVersion()).toEqual({ name: 'marketplace', version: packageVersion });
     const tools = await client.listTools();
     expect(tools.tools.map(({ name }) => name)).toEqual([
       'marketplace_search', 'marketplace_fetch', 'marketplace_status', 'shopping_search', 'shopping_fetch', 'events_search', 'events_fetch', 'messenger_threads_list', 'messenger_thread_read'
@@ -553,7 +557,7 @@ describe('fixture MCP service', () => {
     const result = structured(await (await connectClient()).callTool({ name: 'marketplace_status', arguments: {} }));
     expect(result).toEqual({
       ok: true,
-      service_version: '0.1.0',
+      service_version: packageVersion,
       schema_version: '1.1.0',
       backend: 'status-only',
       facebook_session: { status: 'session_unknown' },
