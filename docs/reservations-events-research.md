@@ -94,11 +94,26 @@ eventAvailability = {
 Mapping notes:
 
 - `status` is derived from Ticketmaster's `dates.status.code`. Live Discovery responses yield only `on_sale`, `off_sale`, `cancelled`, `postponed`, `rescheduled`, or `unknown`; an unrecognized code maps to `unknown` rather than guessing. **`sold_out` is fixture-only** — Discovery cannot prove sold-out, so a live response must never produce it.
-- `starts_at` is taken from `dates.start.dateTime` (an ISO 8601 instant carrying an offset) when present and parseable; otherwise it is `null` (date/time TBD/TBA, or no resolvable instant). The mapper deliberately does **not** fabricate an offset by combining `localDate`/`localTime` with `dates.timezone`.
+- `starts_at` is taken from `dates.start.dateTime` (an ISO 8601 instant carrying an offset) when present and parseable; otherwise it is `null` (date/time TBD/TBA, or no resolvable instant). The mapper deliberately does **not** fabricate an offset by combining `localDate`/`localTime` with `dates.timezone`. The `dateTBD` / `dateTBA` / `timeTBA` flags are honored by treating their absence as "no resolvable instant": a `dateTime` is required and a missing or malformed one yields `null` rather than a guessed value.
 - `price_min` / `price_max` / `currency` come from `priceRanges[]` (face value; fees not guaranteed).
 - `on_sale_start` / `on_sale_end` come from `sales.public.startDateTime` / `endDateTime`.
 - `venue` / `location` come from `_embedded.venues[]` (name; city and country code).
 - `classifications` and `images` are bounded projections of `classifications[]` and `images[]`.
+
+### Calendar date bounds are local-time, never UTC
+
+The search tool accepts `start_date` and `end_date` as calendar dates (`YYYY-MM-DD`) and maps them onto Discovery's documented `localStartDateTime` / `localEndDateTime` parameters. The local-time filter is interpreted in the event's own timezone, which is the semantics a calendar date implies. The previous mapping onto `startDateTime` / `endDateTime` (UTC instants) silently dropped late-evening shows on `end_date` (a 20:00 event in `America/Edmonton` on the local end date is `02:00Z` the following day) and admitted events from the previous local day on `start_date`. The new mapping sends `2025-06-01T00:00:00` and `2025-06-30T23:59:59` with no `Z` suffix; the provider reads them as local bounds. Regression tests cover the boundary cases.
+
+### `events_fetch` URL round trip — regional hosts and segment-boundary ids
+
+The `url` field on a search result is whatever the provider emits, and Discovery covers markets beyond the US. A `ticketmaster.ca` (or other regional) URL must round-trip back through `events_fetch({ url })` and resolve to the same event id. The URL parser:
+
+- accepts hosts on an explicit allowlist of Ticketmaster regional roots (`ticketmaster.com`, `ticketmaster.ca`, `ticketmaster.co.uk`, `ticketmaster.com.au`, `ticketmaster.com.mx`, `ticketmaster.ie`, `ticketmaster.nl`, plus the other regional roots the provider serves), exact match or any subdomain;
+- rejects lookalike hosts that share a suffix with a real root but resolve to a different registrable domain (`ticketmaster.com.evil.example`, `ticketmastercom`, etc.);
+- extracts the id as the path segment after the literal `event` segment, so a longer id is never truncated to a prefix and an `event-prefix` path is not misread as the `event` segment;
+- requires the id to match the same charset as the Zod input schema so the value still parses downstream.
+
+Regression tests cover the regional round trip (CA / UK / AU), lookalike rejection, segment-boundary id extraction, and the existing US round trip.
 
 ### The tools
 

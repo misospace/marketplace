@@ -47,8 +47,15 @@ export class TicketmasterClient {
   async searchEvents(query: string, options: TicketmasterSearchOptions, signal?: AbortSignal): Promise<unknown> {
     const params = new URLSearchParams({ apikey: this.apiKey, keyword: query, size: String(options.limit) });
     if (options.city !== undefined) params.set('city', options.city);
-    if (options.startDate !== undefined) params.set('startDateTime', `${options.startDate}T00:00:00Z`);
-    if (options.endDate !== undefined) params.set('endDateTime', `${options.endDate}T23:59:59Z`);
+    // The user-supplied bounds are calendar dates (YYYY-MM-DD), not instants. Mapping them to
+    // `startDateTime`/`endDateTime` would treat local-midnight in the event's timezone as a UTC
+    // instant and silently drop late-evening shows on `end_date` while admitting events from the
+    // previous local day. Discovery's documented `localStartDateTime` / `localEndDateTime`
+    // parameters filter by the event's own local clock, which is the semantics a calendar date
+    // implies. The bare `T00:00:00` / `T23:59:59` (no `Z`) is intentional — the provider reads
+    // the value as the local event time.
+    if (options.startDate !== undefined) params.set('localStartDateTime', `${options.startDate}T00:00:00`);
+    if (options.endDate !== undefined) params.set('localEndDateTime', `${options.endDate}T23:59:59`);
     return this.apiRequest(`/discovery/v2/events.json?${params}`, signal);
   }
 

@@ -5,7 +5,7 @@ const options = { apiKey: 'synthetic-api-key', baseUrl: 'http://localhost' };
 const ok = (body: unknown, status = 200, headers: Record<string, string> = {}) => new Response(JSON.stringify(body), { status, headers });
 
 describe('TicketmasterClient', () => {
-  it('sends the Discovery query parameters without an Authorization header', async () => {
+  it('sends the Discovery query parameters without an Authorization header and uses local-time bounds for date-only inputs', async () => {
     let seenUrl = '';
     let seenHeaders: Headers | undefined;
     const client = new TicketmasterClient({ ...options, fetchImpl: async (input, init) => {
@@ -20,9 +20,33 @@ describe('TicketmasterClient', () => {
     expect(url.searchParams.get('keyword')).toBe('synthetic jazz');
     expect(url.searchParams.get('size')).toBe('5');
     expect(url.searchParams.get('city')).toBe('Portland');
-    expect(url.searchParams.get('startDateTime')).toBe('2025-06-01T00:00:00Z');
-    expect(url.searchParams.get('endDateTime')).toBe('2025-06-30T23:59:59Z');
+    // Calendar dates map onto the provider's documented local-time filter (`localStartDateTime` /
+    // `localEndDateTime`); the bare `T00:00:00` is intentional — no `Z` suffix, interpreted in
+    // the event's local timezone — so a 20:00 show in Calgary on 2025-06-30 is not excluded by
+    // `endDate=2025-06-30`. Mapping onto `startDateTime`/`endDateTime` instead would treat the
+    // bounds as UTC instants and silently drop late-evening shows on the last day while
+    // admitting events from the previous local day.
+    expect(url.searchParams.get('localStartDateTime')).toBe('2025-06-01T00:00:00');
+    expect(url.searchParams.get('localEndDateTime')).toBe('2025-06-30T23:59:59');
+    expect(url.searchParams.has('startDateTime')).toBe(false);
+    expect(url.searchParams.has('endDateTime')).toBe(false);
     expect(seenHeaders?.has('authorization')).toBe(false);
+  });
+
+  it('omits the local-time bounds when only one calendar date is supplied', async () => {
+    const seenUrls: string[] = [];
+    const client = new TicketmasterClient({ ...options, fetchImpl: async (input) => {
+      seenUrls.push(String(input));
+      return ok({ _embedded: { events: [] } });
+    } });
+    await client.searchEvents('synthetic', { startDate: '2025-06-01', limit: 5 });
+    const onlyStart = new URL(seenUrls[0]!);
+    expect(onlyStart.searchParams.get('localStartDateTime')).toBe('2025-06-01T00:00:00');
+    expect(onlyStart.searchParams.has('localEndDateTime')).toBe(false);
+    await client.searchEvents('synthetic', { endDate: '2025-06-30', limit: 5 });
+    const onlyEnd = new URL(seenUrls[1]!);
+    expect(onlyEnd.searchParams.has('localStartDateTime')).toBe(false);
+    expect(onlyEnd.searchParams.get('localEndDateTime')).toBe('2025-06-30T23:59:59');
   });
 
   it('fetches an event by URL-encoded id with the api key', async () => {

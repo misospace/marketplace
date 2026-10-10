@@ -91,14 +91,61 @@ function mapError(error: unknown): ProviderError {
   return new ProviderError('UPSTREAM_ERROR', 'The Ticketmaster request failed.');
 }
 
+// Trusted Ticketmaster regional host roots. The Discovery API serves the same `url` shape across
+// markets, so accepting a search result that points at a regional site and round-tripping it
+// through `events_fetch({ url })` must keep working. The list is explicit: a host is allowed only
+// if it exactly matches one of these roots or is a subdomain of one. A hostname like
+// `ticketmaster.com.evil.example` ends in neither of these, so the strict suffix check rejects
+// lookalikes; `ticketmastercom` matches nothing. Subdomains (`www.`, locale portals, …) are
+// covered by the suffix branch.
+const TICKETMASTER_HOSTS: readonly string[] = [
+  'ticketmaster.com',
+  'ticketmaster.ca',
+  'ticketmaster.co.uk',
+  'ticketmaster.com.au',
+  'ticketmaster.com.mx',
+  'ticketmaster.ie',
+  'ticketmaster.nl',
+  'ticketmaster.no',
+  'ticketmaster.fi',
+  'ticketmaster.dk',
+  'ticketmaster.de',
+  'ticketmaster.es',
+  'ticketmaster.it',
+  'ticketmaster.fr',
+  'ticketmaster.pl',
+  'ticketmaster.co.nz',
+  'ticketmaster.co.jp',
+  'ticketmaster.sg',
+  'ticketmaster.co.kr',
+  'ticketmaster.co.in',
+  'ticketmaster.co.za',
+  'ticketmaster.at',
+  'ticketmaster.ch',
+  'ticketmaster.be',
+  'ticketmaster.se'
+];
+
+function isTicketmasterHost(host: string): boolean {
+  const lower = host.toLowerCase();
+  return TICKETMASTER_HOSTS.some((root) => lower === root || lower.endsWith(`.${root}`));
+}
+
 function eventIdFromUrl(value: string): string | null {
-  try {
-    const url = new URL(value);
-    const host = url.hostname.toLowerCase();
-    if (host !== 'ticketmaster.com' && !host.endsWith('.ticketmaster.com')) return null;
-    const match = url.pathname.match(/\/event\/([A-Za-z0-9]+)/);
-    return match?.[1] ?? null;
-  } catch { return null; }
+  let url: URL;
+  try { url = new URL(value); } catch { return null; }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
+  if (url.username || url.password) return null;
+  if (!isTicketmasterHost(url.hostname)) return null;
+  // Pull the path segment after `event` so the ID boundary is the segment boundary, not the
+  // first run of alphanumerics. This rejects lookalike paths like `/event-prefix/...` and
+  // never returns a prefix of a longer id.
+  const segments = url.pathname.split('/').filter((segment) => segment.length > 0);
+  const eventIndex = segments.indexOf('event');
+  const id = eventIndex === -1 ? undefined : segments[eventIndex + 1];
+  if (typeof id !== 'string' || id.length === 0) return null;
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(id)) return null;
+  return id;
 }
 
 function isoWithOffset(value: unknown): string | null {

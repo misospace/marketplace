@@ -115,6 +115,56 @@ describe('TicketmasterEventsBackend', () => {
     expect(byUrl).toMatchObject({ id: 'G5v0Z9Yqk1' });
   });
 
+  it('round-trips a search result that points at a regional Ticketmaster host', async () => {
+    mode = 'normal';
+    // The Discovery API emits canonical URLs that may use regional Ticketmaster host roots
+    // (e.g. ticketmaster.ca for Canadian markets). Accepting the regional host and extracting
+    // the same id is what makes the search→fetch round trip close without surfacing an
+    // `UPSTREAM_ERROR` for legitimate results.
+    const byUrl = await backend().fetch(eventsFetchInputSchema.parse({ url: 'https://www.ticketmaster.ca/event/G5v0Z9Yqk1' }), signal());
+    expect(byUrl).toMatchObject({ id: 'G5v0Z9Yqk1' });
+    const byUk = await backend().fetch(eventsFetchInputSchema.parse({ url: 'https://www.ticketmaster.co.uk/event/G5v0Z9Yqk1?lang=en' }), signal());
+    expect(byUk).toMatchObject({ id: 'G5v0Z9Yqk1' });
+    const byAu = await backend().fetch(eventsFetchInputSchema.parse({ url: 'https://www.ticketmaster.com.au/event/G5v0Z9Yqk1' }), signal());
+    expect(byAu).toMatchObject({ id: 'G5v0Z9Yqk1' });
+  });
+
+  it('rejects lookalike and off-allowlist hosts while still trusting the regional suffix', async () => {
+    mode = 'normal';
+    // A lookalike that ends in `ticketmaster.com.evil.example` is not on the allowlist and
+    // must not be accepted; the strict suffix check rejects it.
+    await expect(backend().fetch(eventsFetchInputSchema.parse({ url: 'https://ticketmaster.com.evil.example/event/G5v0Z9Yqk1' }), signal())).rejects.toMatchObject({
+      code: 'UPSTREAM_ERROR', message: 'The Ticketmaster event URL does not contain an event id.'
+    });
+    // A typosquatted host that isn't a real Ticketmaster regional root is also rejected.
+    await expect(backend().fetch(eventsFetchInputSchema.parse({ url: 'https://ticketmastercom/event/G5v0Z9Yqk1' }), signal())).rejects.toMatchObject({
+      code: 'UPSTREAM_ERROR', message: 'The Ticketmaster event URL does not contain an event id.'
+    });
+    // A subdomain on a regional root is still trusted.
+    const byLocale = await backend().fetch(eventsFetchInputSchema.parse({ url: 'https://www1.ticketmaster.ca/event/G5v0Z9Yqk1' }), signal());
+    expect(byLocale).toMatchObject({ id: 'G5v0Z9Yqk1' });
+    // A host that is a real regional root but is on plain http still has its id extracted
+    // (the destination restriction on the API client is the real safety mechanism, and a
+    // future per-URL credential-destination check would belong there). The lookup itself
+    // does not navigate to the URL.
+    const byHttpCa = await backend().fetch(eventsFetchInputSchema.parse({ url: 'http://www.ticketmaster.ca/event/G5v0Z9Yqk1' }), signal());
+    expect(byHttpCa).toMatchObject({ id: 'G5v0Z9Yqk1' });
+  });
+
+  it('extracts the id by path segment so a longer id or a non-event path is handled correctly', async () => {
+    mode = 'normal';
+    // The id boundary is the path segment, not a regex prefix. A URL that points at a
+    // artist page (no `event` segment) is rejected, not silently misread.
+    await expect(backend().fetch(eventsFetchInputSchema.parse({ url: 'https://www.ticketmaster.com/artist/12345' }), signal())).rejects.toMatchObject({
+      code: 'UPSTREAM_ERROR', message: 'The Ticketmaster event URL does not contain an event id.'
+    });
+    // An `event-prefix` segment is not the `event` segment — exact equality is required, so
+    // this is rejected rather than returning a wrong id.
+    await expect(backend().fetch(eventsFetchInputSchema.parse({ url: 'https://www.ticketmaster.com/event-prefix/12345' }), signal())).rejects.toMatchObject({
+      code: 'UPSTREAM_ERROR', message: 'The Ticketmaster event URL does not contain an event id.'
+    });
+  });
+
   it('rejects a URL that carries no event id', async () => {
     await expect(backend().fetch(eventsFetchInputSchema.parse({ url: 'https://www.ticketmaster.com/artist/12345' }), signal())).rejects.toMatchObject({
       code: 'UPSTREAM_ERROR', message: 'The Ticketmaster event URL does not contain an event id.'
