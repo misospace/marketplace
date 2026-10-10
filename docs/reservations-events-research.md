@@ -108,6 +108,7 @@ The search tool accepts `start_date` and `end_date` as calendar dates (`YYYY-MM-
 
 The `url` field on a search result is whatever the provider emits, and Discovery covers markets beyond the US. A `ticketmaster.ca` (or other regional) URL must round-trip back through `events_fetch({ url })` and resolve to the same event id. The URL parser:
 
+- requires the `https` scheme — a plain `http` URL is rejected, so id extraction is never more permissive than the credential-destination policy (the API key travels as a query parameter);
 - accepts hosts on an explicit allowlist of Ticketmaster regional roots (`ticketmaster.com`, `ticketmaster.ca`, `ticketmaster.co.uk`, `ticketmaster.com.au`, `ticketmaster.com.mx`, `ticketmaster.ie`, `ticketmaster.nl`, plus the other regional roots the provider serves), exact match or any subdomain;
 - rejects lookalike hosts that share a suffix with a real root but resolve to a different registrable domain (`ticketmaster.com.evil.example`, `ticketmastercom`, etc.);
 - extracts the id as the path segment after the literal `event` segment, so a longer id is never truncated to a prefix and an `event-prefix` path is not misread as the `event` segment;
@@ -122,7 +123,7 @@ Regression tests cover the regional round trip (CA / UK / AU), lookalike rejecti
 | `events_search` | `read` | `(ticketmaster, default, events)` | Searches the configured events source and returns bounded `eventAvailability` facts |
 | `events_fetch` | `read` | `(ticketmaster, default, events)` | Fetches one event by id from the configured events source |
 
-Contract: events with an unknown start date/time (`starts_at: null`) are excluded from date-bounded searches (when `start_date` and/or `end_date` is supplied) on both the fixture and provider paths; they remain visible in unbounded searches and via `events_fetch`.
+Contract: events with an unknown start date/time (`starts_at: null`) are excluded from date-bounded searches (when `start_date` and/or `end_date` is supplied) on the fixture path and, per Discovery's local-date filtering, expected to be excluded on the provider path (live validation pending an operator key); they remain visible in unbounded searches and via `events_fetch`.
 
 Configuration: `EVENTS_BACKEND=fixture|ticketmaster` (default `fixture`, so the tool list is stable without keys, mirroring the shopping opt-in pattern). Key material is read from `TICKETMASTER_API_KEY` in the environment when the service constructs the Ticketmaster client, and is never logged or returned.
 

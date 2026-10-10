@@ -550,6 +550,20 @@ describe('fixture MCP service', () => {
     expect(boundedIds).not.toContain('synth-event-002');
     expect(boundedIds).not.toContain('synth-event-004');
     expect(boundedIds).toContain('synth-event-001');
+    const startOnly = structured(await client.callTool({ name: 'events_search', arguments: { query: 'synthetic', start_date: '2000-01-01' } }));
+    const startOnlyIds = startOnly.events.map((event: { id: string }) => event.id);
+    expect(startOnlyIds).not.toContain('synth-event-002');
+    expect(startOnlyIds).not.toContain('synth-event-004');
+    expect(startOnlyIds).toContain('synth-event-001');
+    const endOnly = structured(await client.callTool({ name: 'events_search', arguments: { query: 'synthetic', end_date: '2099-12-31' } }));
+    const endOnlyIds = endOnly.events.map((event: { id: string }) => event.id);
+    expect(endOnlyIds).not.toContain('synth-event-002');
+    expect(endOnlyIds).not.toContain('synth-event-004');
+    expect(endOnlyIds).toContain('synth-event-001');
+    // The TBD event (starts_at: null) is still returned by events_fetch, matched by id.
+    const fetched = structured(await client.callTool({ name: 'events_fetch', arguments: { id: 'synth-event-002' } }));
+    expect(fetched.event.id).toBe('synth-event-002');
+    expect(fetched.event.starts_at).toBe(null);
   });
 
   it('enables Messenger only for MARKETPLACE_MESSENGER=1', () => {
