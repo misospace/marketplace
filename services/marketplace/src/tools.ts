@@ -1,7 +1,7 @@
 import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { CallToolRequestSchema, ErrorCode, ListToolsRequestSchema, McpError } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
-import { ProviderError, type ConversationBackend, type MarketplaceBackend, type ShoppingBackend } from './backend.js';
+import { ProviderError, type ConversationBackend, type EventsBackend, type MarketplaceBackend, type ShoppingBackend } from './backend.js';
 import type { ProviderSessionAssessment } from './browser.js';
 import {
   authorizeAction,
@@ -30,12 +30,17 @@ import {
   shoppingSearchInputSchema,
   shoppingFetchInputSchema,
   shoppingSearchOutputSchema,
-  shoppingFetchOutputSchema
+  shoppingFetchOutputSchema,
+  eventsSearchInputSchema,
+  eventsFetchInputSchema,
+  eventsSearchOutputSchema,
+  eventsFetchOutputSchema
 } from './domain.js';
 
 const marketplaceScope = { provider: 'facebook', account: 'default', surface: 'marketplace' } as const;
 const messengerScope = { provider: 'facebook', account: 'default', surface: 'messenger' } as const;
 const shoppingScope = { provider: 'ebay', account: 'default', surface: 'shopping' } as const;
+const eventsScope = { provider: 'ticketmaster', account: 'default', surface: 'events' } as const;
 
 const TOOLS = [
   {
@@ -74,6 +79,20 @@ const TOOLS = [
     definition: { riskClass: 'read', scope: shoppingScope }
   },
   {
+    name: 'events_search',
+    description: 'Search one configured events source for read-only availability: on-sale status, date/time, price ranges, and venue. Read-only.',
+    inputSchema: eventsSearchInputSchema,
+    outputSchema: eventsSearchOutputSchema,
+    definition: { riskClass: 'read', scope: eventsScope }
+  },
+  {
+    name: 'events_fetch',
+    description: "Fetch one event's read-only availability by canonical ID or URL from the configured events source. Read-only.",
+    inputSchema: eventsFetchInputSchema,
+    outputSchema: eventsFetchOutputSchema,
+    definition: { riskClass: 'read', scope: eventsScope }
+  },
+  {
     name: 'messenger_threads_list',
     description: 'List recent seller conversation threads from the Facebook Marketplace inbox. Read-only.',
     inputSchema: threadsListInputSchema,
@@ -106,6 +125,7 @@ export interface MarketplaceToolOptions {
   authorizer?: ActionAuthorizer;
   conversations?: ConversationBackend;
   shopping?: ShoppingBackend;
+  events?: EventsBackend;
 }
 
 export function assertWritableToolsHaveAuthorizer(
@@ -183,8 +203,12 @@ export function registerMarketplaceTools(
               ? shoppingSearchOutputSchema
               : name === 'shopping_fetch'
                 ? shoppingFetchOutputSchema
-                : statusOutputSchema;
-    let validatedOutput: z.infer<typeof searchOutputSchema | typeof fetchOutputSchema | typeof statusOutputSchema | typeof threadsListOutputSchema | typeof threadReadOutputSchema | typeof shoppingSearchOutputSchema | typeof shoppingFetchOutputSchema>;
+                : name === 'events_search'
+                  ? eventsSearchOutputSchema
+                  : name === 'events_fetch'
+                    ? eventsFetchOutputSchema
+                    : statusOutputSchema;
+    let validatedOutput: z.infer<typeof searchOutputSchema | typeof fetchOutputSchema | typeof statusOutputSchema | typeof threadsListOutputSchema | typeof threadReadOutputSchema | typeof shoppingSearchOutputSchema | typeof shoppingFetchOutputSchema | typeof eventsSearchOutputSchema | typeof eventsFetchOutputSchema>;
     if (!decision.ok) {
       // Refusals parse against the shared runtime failure schema so the uniform refusal shape
       // does not depend on each tool's success-oriented output schema.
@@ -254,6 +278,28 @@ export function registerMarketplaceTools(
           output = offer === null
             ? runtimeFailure('NOT_FOUND', 'No product offer matched the supplied identifier.')
             : { ok: true, backend: shopping.name, offer };
+        } else if (name === 'events_search') {
+          const events = options.events;
+          if (!events) throw new ProviderError('UPSTREAM_ERROR', 'The events surface is not configured on this deployment.');
+          const results = await runBackendOperation(
+            (signal) => events.search(parsed.data as z.infer<typeof eventsSearchInputSchema>, signal),
+            backendTimeoutMs,
+            extra.signal,
+            shutdownSignal
+          );
+          output = { ok: true, backend: events.name, events: results };
+        } else if (name === 'events_fetch') {
+          const events = options.events;
+          if (!events) throw new ProviderError('UPSTREAM_ERROR', 'The events surface is not configured on this deployment.');
+          const event = await runBackendOperation(
+            (signal) => events.fetch(parsed.data as z.infer<typeof eventsFetchInputSchema>, signal),
+            backendTimeoutMs,
+            extra.signal,
+            shutdownSignal
+          );
+          output = event === null
+            ? runtimeFailure('NOT_FOUND', 'No event matched the supplied identifier.')
+            : { ok: true, backend: events.name, event };
         } else {
           const sessionAssessment = options.sessionAssessment;
           output = {
@@ -262,6 +308,7 @@ export function registerMarketplaceTools(
             schema_version: SCHEMA_VERSION,
             backend: backendName,
             shopping_backend: options.shopping?.name,
+            events_backend: options.events?.name,
             ...(sessionAssessment ? { facebook_session: { status: sessionAssessment() } } : {})
           };
         }

@@ -1,7 +1,9 @@
 import { facebookMarketsFilePath, loadFacebookMarkets } from './market-config.js';
 import { createMarketplaceService, installShutdownHandlers, listen } from './service.js';
 
-export { FixtureBackend, ProviderError, type ConversationBackend, type MarketplaceBackend } from './backend.js';
+export { FixtureBackend, ProviderError, type ConversationBackend, type EventsBackend, type MarketplaceBackend } from './backend.js';
+export { TicketmasterClient, TicketmasterHttpError, type TicketmasterClientOptions } from './ticketmaster.js';
+export { TicketmasterEventsBackend } from './ticketmaster-backend.js';
 export { FacebookMarketplaceBackend, type FacebookMarketplaceBackendOptions } from './facebook-marketplace-backend.js';
 export {
   BROWSER_SESSION_STATUSES,
@@ -27,7 +29,7 @@ export {
   type FacebookSessionProbeOptions,
   type FacebookPageSnapshot
 } from './facebook.js';
-export { FIXTURE_CONVERSATIONS, FIXTURE_LISTINGS } from './fixtures.js';
+export { FIXTURE_CONVERSATIONS, FIXTURE_EVENTS, FIXTURE_LISTINGS, FixtureEventsBackend } from './fixtures.js';
 export {
   DEFAULT_FACEBOOK_MARKETS,
   MARKETPLACE_ITEM_PATH,
