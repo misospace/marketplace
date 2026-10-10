@@ -1,3 +1,4 @@
+import { createHmac } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -8,6 +9,7 @@ import {
   authorizeAction,
   canonicalActionInput,
   DenyAllAuthorizer,
+  HmacGrantAuthorizer,
   subjectDigest
 } from '../src/authorization.js';
 import { UnverifiedGrantAuthorizer } from './helpers/unverified-grant-authorizer.js';
@@ -153,6 +155,116 @@ describe('in-memory approval grants', () => {
   });
 });
 
+describe('hmac-signed approval grants', () => {
+  const secret = '0123456789abcdef0123456789abcdef01234567';
+
+  function sign(value: ApprovalGrant) {
+    return {
+      grant: value,
+      signature: createHmac('sha256', secret).update(canonicalActionInput(value), 'utf8').digest('hex')
+    };
+  }
+
+  function authorizer(): HmacGrantAuthorizer {
+    return new HmacGrantAuthorizer({ secret, now: () => fixedNow });
+  }
+
+  it('authorizes a valid signed grant once and rejects reuse as single-use', () => {
+    const verifier = authorizer();
+    const approval = sign(grant());
+
+    expect(verifier.authorize(request, approval)).toEqual({ ok: true });
+    expect(verifier.authorize(request, approval)).toEqual({
+      ok: false,
+      code: 'ACTION_FORBIDDEN',
+      message: 'The approval grant has already been used.'
+    });
+  });
+
+  it('rejects a grant field tampered after signing with the signature-invalid message', () => {
+    const verifier = authorizer();
+    const approval = sign(grant());
+    const tampered = { ...approval, grant: { ...approval.grant, action: 'other-action' } };
+
+    expect(verifier.authorize(request, tampered)).toEqual({
+      ok: false,
+      code: 'ACTION_FORBIDDEN',
+      message: 'The presented grant does not carry a valid issuer signature.'
+    });
+  });
+
+  it('rejects a correctly signed grant with a mismatched scope or action', () => {
+    const verifier = authorizer();
+    expect(verifier.authorize(request, sign(grant({ action: 'other-action' }))))
+      .toEqual({
+        ok: false,
+        code: 'ACTION_FORBIDDEN',
+        message: 'The presented grant does not authorize this action.'
+      });
+  });
+
+  it('rejects an expired signed grant', () => {
+    const verifier = authorizer();
+    expect(verifier.authorize(request, sign(grant({ expires_at: fixedNow.toISOString() }))))
+      .toEqual({
+        ok: false,
+        code: 'ACTION_FORBIDDEN',
+        message: 'The approval grant has expired.'
+      });
+  });
+
+  it.each([
+    ['missing signature', { grant: grant() }],
+    ['non-envelope grant object', grant()],
+    ['envelope with an extra key', { ...sign(grant()), extra: 'x' }],
+    ['inner grant with an extra key', { grant: { ...grant(), extra: 'x' }, signature: '0'.repeat(64) }],
+    ['uppercase hex signature', { grant: grant(), signature: sign(grant()).signature.toUpperCase() }]
+  ])('fails with APPROVAL_REQUIRED for a %s', (_label, envelope) => {
+    expect(authorizer().authorize(request, envelope)).toEqual({
+      ok: false,
+      code: 'APPROVAL_REQUIRED',
+      message: 'A valid approval grant is required for this action.'
+    });
+  });
+
+  it('rejects a constructor secret shorter than 32 characters', () => {
+    expect(() => new HmacGrantAuthorizer({ secret: '0123456789abcdef01234567' })).toThrow(TypeError);
+  });
+
+  it('keeps grant ids and digests out of every refusal message', () => {
+    const verifier = authorizer();
+    const approval = grant();
+    const candidates = [
+      undefined,
+      approval,
+      sign(approval),
+      sign(approval),
+      { ...sign(approval), grant: { ...approval, action: 'other-action' } },
+      sign({ ...approval, action: 'other-action' }),
+      sign({ ...approval, expires_at: fixedNow.toISOString() })
+    ];
+    const refusals: string[] = [];
+    for (const candidate of candidates) {
+      const decision = verifier.authorize(request, candidate);
+      if (!decision.ok) refusals.push(decision.message);
+    }
+
+    expect(refusals).toEqual([
+      'A valid approval grant is required for this action.',
+      'A valid approval grant is required for this action.',
+      'The approval grant has already been used.',
+      'The presented grant does not carry a valid issuer signature.',
+      'The presented grant does not authorize this action.',
+      'The approval grant has expired.'
+    ]);
+    for (const message of refusals) {
+      expect(message).not.toContain(approval.grant_id);
+      expect(message).not.toContain(approval.subject_digest);
+      expect(message).not.toContain(request.subjectDigest);
+    }
+  });
+});
+
 describe('write-tool registration guard', () => {
   const readEntry = { name: 'marketplace_search', definition: { riskClass: 'read', scope: sendDefinition.scope } as const };
   const sendEntry = { name: 'marketplace_send_message', definition: sendDefinition };
@@ -170,9 +282,13 @@ describe('write-tool registration guard', () => {
 });
 
 describe('registered tool action boundaries', () => {
-  it('declares every registered tool read-only and dispatches through the real MCP server', async () => {
+  it('declares a risk class for every registered tool and dispatches through the real MCP server', async () => {
     expect(ACTION_RISK_CLASSES).toEqual(['read', 'prepare', 'send', 'high_consequence']);
-    expect(Object.values(TOOL_DEFINITIONS).every(({ riskClass }) => riskClass === 'read')).toBe(true);
+    expect(Object.values(TOOL_DEFINITIONS).every(({ riskClass }) => (ACTION_RISK_CLASSES as readonly string[]).includes(riskClass))).toBe(true);
+    expect(TOOL_DEFINITIONS.messenger_send.riskClass).toBe('send');
+    expect(TOOL_DEFINITIONS.messenger_threads_list.riskClass).toBe('read');
+    expect(TOOL_DEFINITIONS.messenger_thread_read.riskClass).toBe('read');
+    expect(TOOL_DEFINITIONS.messenger_send.scope).toEqual({ provider: 'facebook', account: 'default', surface: 'messenger' });
     expect(TOOL_DEFINITIONS.messenger_threads_list.scope).toEqual({ provider: 'facebook', account: 'default', surface: 'messenger' });
     expect(TOOL_DEFINITIONS.messenger_thread_read.scope).toEqual({ provider: 'facebook', account: 'default', surface: 'messenger' });
 
@@ -185,8 +301,9 @@ describe('registered tool action boundaries', () => {
       await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
       const tools = await client.listTools();
       const registeredNames = tools.tools.map(({ name }) => name).sort();
-      expect(registeredNames).toEqual(Object.keys(TOOL_DEFINITIONS).sort());
-      expect(Object.keys(TOOL_DEFINITIONS).every((name) => tools.tools.some((tool) => tool.name === name))).toBe(true);
+      // Without a configured conversation surface the send tool is not live, so the live
+      // listing is the declaration map minus messenger_send.
+      expect(registeredNames).toEqual(Object.keys(TOOL_DEFINITIONS).filter((name) => name !== 'messenger_send').sort());
     } finally {
       await Promise.allSettled([client.close(), server.close()]);
     }

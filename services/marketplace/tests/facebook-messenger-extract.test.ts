@@ -4,7 +4,8 @@ import { chromium, type Browser, type Page } from 'playwright';
 import {
   extractMessengerInboxPage,
   extractMessengerThreadPage,
-  MESSENGER_EXTRACT_LIMITS
+  MESSENGER_EXTRACT_LIMITS,
+  classifyMessengerComposerCount
 } from '../src/facebook-messenger-extract.js';
 import { MESSENGER_THREAD_PATH } from '../src/facebook-messenger-url.js';
 import { classifyMessengerInboxPage, classifyMessengerThreadPage } from '../src/facebook-messenger-parse.js';
@@ -100,5 +101,35 @@ describe.skipIf(!browserAvailable)('Facebook Messenger page extraction', () => {
     });
     expect(messages.messages).toHaveLength(3);
     expect(messages.messages[0]?.text).toBe('Message 0');
+  });
+});
+
+// Non-browser unit test: verifies the pure composer decision contract (count ->
+// present/absent/ambiguous) that the real sendThread applies on the Node side after the
+// thin in-page count. No page or browser APIs are involved, so this runs locally without
+// Chromium.
+describe('classifyMessengerComposerCount (pure composer decision contract)', () => {
+  it('reports absent when there are no contract composers', () => {
+    expect(classifyMessengerComposerCount(0)).toBe('absent');
+  });
+
+  it('reports present when there is exactly one contract composer', () => {
+    expect(classifyMessengerComposerCount(1)).toBe('present');
+  });
+
+  it('reports ambiguous when there are two or more contract composers (unsafe to target)', () => {
+    expect(classifyMessengerComposerCount(2)).toBe('ambiguous');
+    expect(classifyMessengerComposerCount(3)).toBe('ambiguous');
+    expect(classifyMessengerComposerCount(10)).toBe('ambiguous');
+  });
+
+  it('treats a non-positive count as absent (defensive)', () => {
+    expect(classifyMessengerComposerCount(-1)).toBe('absent');
+  });
+
+  it('is deterministic across repeated calls for the same count', () => {
+    for (let count = 0; count <= 4; count++) {
+      expect(classifyMessengerComposerCount(count)).toBe(classifyMessengerComposerCount(count));
+    }
   });
 });

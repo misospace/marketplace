@@ -203,3 +203,44 @@ export function extractMessengerThreadPage(options: ExtractMessengerThreadOption
   }
   return { url, signals, messages };
 }
+
+// The message composer is recognized strictly by its accessibility contract: a contenteditable
+// textbox that carries an aria label. The element's text and aria-label values are intentionally
+// never read or returned by this extraction, so no page content can leak through it.
+export const MESSENGER_COMPOSER_SELECTOR = 'div[contenteditable="true"][role="textbox"][aria-label]';
+
+export type MessengerComposerPresence = 'present' | 'absent' | 'ambiguous';
+
+/**
+ * Pure decision contract for the message composer: maps the number of contract composer
+ * nodes to `absent` (none), `present` (exactly one), or `ambiguous` (two or more, which is
+ * unsafe to target). This has no page or browser APIs, so it can be unit-tested directly and
+ * is applied on the Node side after the thin in-page count.
+ */
+export function classifyMessengerComposerCount(composerCount: number): MessengerComposerPresence {
+  if (composerCount <= 0) return 'absent';
+  if (composerCount === 1) return 'present';
+  return 'ambiguous';
+}
+
+export interface ExtractedComposerPage {
+  url: string;
+  composerCount: number;
+}
+
+export interface FindMessengerComposerOptions {
+  selector: string;
+}
+
+/**
+ * Thin in-page count for the message composer, run via `page.evaluate`. It reports only the
+ * number of contract composer nodes and the page url — no classification, no text, no
+ * aria-label values. The presence decision is applied on the Node side by
+ * `classifyMessengerComposerCount`, which keeps this serializable function self-contained
+ * (an in-page function cannot close over module-level helpers).
+ */
+export function findMessengerComposer(options: FindMessengerComposerOptions): ExtractedComposerPage {
+  const url = location.href.slice(0, 2048);
+  const composerCount = document.querySelectorAll(options.selector).length;
+  return { url, composerCount };
+}

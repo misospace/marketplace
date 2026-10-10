@@ -1,3 +1,4 @@
+import { createHmac } from 'node:crypto';
 import { createServer as createHttpServer, request as httpRequest } from 'node:http';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -18,6 +19,7 @@ import * as packageEntry from '../src/index.js';
 import { runBackendOperation } from '../src/tools.js';
 import { threadsListInputSchema, threadReadInputSchema } from '../src/domain.js';
 import { FakeReauthRuntime } from './helpers/fake-reauth-runtime.js';
+import { canonicalActionInput, type ActionRequest, type ApprovalGrant, type SignedGrantEnvelope } from '../src/authorization.js';
 
 const packageVersion = JSON.parse(
   readFileSync(new URL('../package.json', import.meta.url), 'utf8')
@@ -306,7 +308,7 @@ describe('fixture MCP service', () => {
     expect(client.getServerVersion()).toEqual({ name: 'marketplace', version: packageVersion });
     const tools = await client.listTools();
     expect(tools.tools.map(({ name }) => name)).toEqual([
-      'marketplace_search', 'marketplace_fetch', 'marketplace_status', 'shopping_search', 'shopping_fetch', 'messenger_threads_list', 'messenger_thread_read'
+      'marketplace_search', 'marketplace_fetch', 'marketplace_status', 'shopping_search', 'shopping_fetch', 'messenger_threads_list', 'messenger_thread_read', 'messenger_send'
     ]);
     expect(tools.tools.map(({ description }) => description)).toEqual([
       'Search marketplace listings.',
@@ -315,7 +317,8 @@ describe('fixture MCP service', () => {
       'Search one configured shopping source for products with prices, availability, and provenance. Read-only.',
       'Fetch one product offer by canonical ID or URL from the configured shopping source. Read-only.',
       'List recent seller conversation threads from the Facebook Marketplace inbox. Read-only.',
-      'Read the messages of one marketplace conversation thread by ID. Read-only, but opening the thread marks it "Seen" for the other participant.'
+      'Read the messages of one marketplace conversation thread by ID. Read-only, but opening the thread marks it "Seen" for the other participant.',
+      'Send one approval-grant-bound message into a conversation thread. Requires a single-use signed approval grant; a timed-out send is reconciled by reading the thread for its idempotency token and is never resent.'
     ]);
     for (const tool of tools.tools) {
       expect(tool.outputSchema).toBeDefined();
@@ -1069,8 +1072,194 @@ describe('fixture MCP service', () => {
   });
 });
 
+describe('production authorizer and messenger reauth wiring', () => {
+  it('fails messenger_send closed with a deny-all authorizer when no grant-issuer secret is configured', async () => {
+    const client = await connectClient();
+    const sendInput = { thread_id: 't-synth-0001', message: 'Is the bike still available?', idempotency_token: 'idempotency-deny-all-0001' };
+    const refusal = structured(await client.callTool({ name: 'messenger_send', arguments: sendInput }));
+    expect(refusal.ok).toBe(false);
+    expect(refusal.error.code).toBe('APPROVAL_REQUIRED');
+    // The refusal must not have delivered anything: the fixture thread is unchanged.
+    const thread = structured(await client.callTool({ name: 'messenger_thread_read', arguments: { thread_id: sendInput.thread_id } }));
+    expect(thread.ok).toBe(true);
+    expect(thread.messages).toHaveLength(3);
+    expect(thread.messages.every(({ sender }: { sender: string }) => sender === 'you')).toBe(false);
+  });
+
+  it('authorizes a correctly signed grant through the HMAC verifier and delivers the message', async () => {
+    await Promise.allSettled(clients.splice(0).map((client) => client.close()));
+    await service.close();
+    const secret = '0123456789abcdef0123456789abcdef0123456789abcdef';
+    service = createMarketplaceService({
+      host: '127.0.0.1',
+      port: 0,
+      adminPort: 0,
+      grantIssuerSecret: secret,
+      approvalGrant: (request) => signGrantFor(request, secret)
+    });
+    await packageEntry.listen(service);
+    const address = service.address();
+    if (!address || typeof address === 'string') throw new Error('Expected a TCP address');
+    baseUrl = `http://127.0.0.1:${address.port}`;
+    const client = await connectClient();
+    const sendInput = { thread_id: 't-synth-0001', message: 'Yes, it is available.', idempotency_token: 'idempotency-signed-ok-0001' };
+    const sent = structured(await client.callTool({ name: 'messenger_send', arguments: sendInput }));
+    expect(sent).toEqual({ ok: true, backend: 'fixture', thread_id: sendInput.thread_id, status: 'sent' });
+    const thread = structured(await client.callTool({ name: 'messenger_thread_read', arguments: { thread_id: sendInput.thread_id } }));
+    expect(thread.ok).toBe(true);
+    expect(thread.messages).toHaveLength(4);
+    expect(thread.messages.at(-1)).toEqual({ sender: 'you', text: 'Yes, it is available. [idempotency-signed-ok-0001]' });
+  });
+
+  it('refuses a tampered grant signature and treats each signed envelope as single-use', async () => {
+    await Promise.allSettled(clients.splice(0).map((client) => client.close()));
+    await service.close();
+    const secret = '0123456789abcdef0123456789abcdef0123456789abcdef';
+    let tamperNext = false;
+    service = createMarketplaceService({
+      host: '127.0.0.1',
+      port: 0,
+      adminPort: 0,
+      grantIssuerSecret: secret,
+      approvalGrant: (request) => {
+        const presented: ApprovalGrant = {
+          grant_id: `grant-${request.subjectDigest.slice(0, 16)}`,
+          provider: request.provider,
+          account: request.account,
+          surface: request.surface,
+          action: request.action,
+          subject_digest: request.subjectDigest,
+          expires_at: '2099-01-01T00:00:00.000Z'
+        };
+        // Sign over a different (tampered) grant so the presented signature does not verify.
+        const signed: ApprovalGrant = tamperNext ? { ...presented, subject_digest: '0'.repeat(64) } : presented;
+        return { grant: presented, signature: createHmac('sha256', secret).update(canonicalActionInput(signed), 'utf8').digest('hex') };
+      }
+    });
+    await packageEntry.listen(service);
+    const address = service.address();
+    if (!address || typeof address === 'string') throw new Error('Expected a TCP address');
+    baseUrl = `http://127.0.0.1:${address.port}`;
+    const client = await connectClient();
+    const sendInput = { thread_id: 't-synth-0002', message: 'Would you accept a little less?', idempotency_token: 'idempotency-single-use-0001' };
+
+    // 1. A signature that does not verify for the presented grant is refused; nothing is delivered.
+    tamperNext = true;
+    const tampered = structured(await client.callTool({ name: 'messenger_send', arguments: sendInput }));
+    expect(tampered.ok).toBe(false);
+    expect(tampered.error.code).toBe('ACTION_FORBIDDEN');
+    expect(tampered.error.message).toBe('The presented grant does not carry a valid issuer signature.');
+    expect(structured(await client.callTool({ name: 'messenger_thread_read', arguments: { thread_id: sendInput.thread_id } })).messages).toHaveLength(2);
+
+    // 2. A correctly signed grant for the same action is delivered and consumed.
+    tamperNext = false;
+    const first = structured(await client.callTool({ name: 'messenger_send', arguments: sendInput }));
+    expect(first).toEqual({ ok: true, backend: 'fixture', thread_id: sendInput.thread_id, status: 'sent' });
+
+    // 3. Resubmitting the SAME envelope is refused as already used; only one message was delivered.
+    const second = structured(await client.callTool({ name: 'messenger_send', arguments: sendInput }));
+    expect(second.ok).toBe(false);
+    expect(second.error.code).toBe('ACTION_FORBIDDEN');
+    expect(second.error.message).toBe('The approval grant has already been used.');
+    expect(structured(await client.callTool({ name: 'messenger_thread_read', arguments: { thread_id: sendInput.thread_id } })).messages).toHaveLength(3);
+  });
+
+  it('exposes a separate messenger reauth loop and admin port when Messenger is enabled for Facebook', async () => {
+    await Promise.allSettled(clients.splice(0).map((client) => client.close()));
+    await service.close();
+    const profileRoot = mkdtempSync(join(tmpdir(), 'marketplace-messenger-reauth-'));
+    try {
+      service = createMarketplaceService({
+        host: '127.0.0.1',
+        port: 0,
+        adminPort: 0,
+        backendKind: 'facebook',
+        messengerEnabled: true,
+        messengerProfileDir: join(profileRoot, 'messenger'),
+        facebookBaseUrl: 'http://127.0.0.1:3210',
+        messengerReauthAdminPort: 0,
+        messengerReauthViewerPort: 0
+      });
+      // The messenger scope owns its own reauth manager and admin, distinct from the marketplace ones.
+      expect(service.messengerReauth).toBeDefined();
+      expect(service.messengerAdmin).toBeDefined();
+      expect(service.messengerReauth).not.toBe(service.reauth);
+      expect(service.messengerAdmin).not.toBe(service.admin);
+      await packageEntry.listen(service);
+      const adminAddress = service.admin.address();
+      const messengerAdminAddress = service.messengerAdmin?.address();
+      if (!adminAddress || typeof adminAddress === 'string') throw new Error('Expected a marketplace admin address');
+      if (!messengerAdminAddress || typeof messengerAdminAddress === 'string') throw new Error('Expected a messenger admin address');
+      expect(adminAddress.port).not.toBe(messengerAdminAddress.port);
+      // The messenger admin serves its own manager's status; both managers are idle and distinct.
+      const messengerStatus = await fetch(`http://127.0.0.1:${messengerAdminAddress.port}/reauth/status`);
+      expect(messengerStatus.status).toBe(200);
+      expect(await messengerStatus.json()).toEqual({ phase: 'idle', lease: null, expiresAt: null, remainingMs: null });
+      const marketplaceStatus = await fetch(`http://127.0.0.1:${adminAddress.port}/reauth/status`);
+      expect(marketplaceStatus.status).toBe(200);
+      expect(await marketplaceStatus.json()).toEqual({ phase: 'idle', lease: null, expiresAt: null, remainingMs: null });
+    } finally {
+      await service.close();
+      rmSync(profileRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('does not construct a messenger reauth loop for a fixture deployment', async () => {
+    expect(service.messengerReauth).toBeUndefined();
+    expect(service.messengerAdmin).toBeUndefined();
+    expect(service.messengerBrowser).toBeUndefined();
+    expect(service.messengerProbe).toBeUndefined();
+  });
+
+  it('closes a messenger reauth built through the fake runtime seam during service shutdown', async () => {
+    await Promise.allSettled(clients.splice(0).map((client) => client.close()));
+    await service.close();
+    const profileRoot = mkdtempSync(join(tmpdir(), 'marketplace-messenger-reauth-close-'));
+    const runtime = new FakeReauthRuntime();
+    try {
+      service = createMarketplaceService({
+        host: '127.0.0.1',
+        port: 0,
+        adminPort: 0,
+        backendKind: 'facebook',
+        messengerEnabled: true,
+        messengerProfileDir: join(profileRoot, 'messenger'),
+        messengerReauthRuntime: runtime,
+        messengerReauthAdminPort: 0,
+        messengerReauthViewerPort: 0
+      });
+      await packageEntry.listen(service);
+      await expectCompletesWithin(service.close(), 3_000);
+      expect(service.messengerReauth?.status()).toMatchObject({ phase: 'idle', lease: null });
+    } finally {
+      await service.close();
+      await runtime.stopAll();
+      rmSync(profileRoot, { recursive: true, force: true });
+    }
+  });
+});
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+// Builds a correctly signed approval-grant envelope for a validated action request, the way the
+// approval-owning host (Miso/OpenClaw) would: the grant echoes the request's scope and payload
+// digest, and the HMAC is computed over the grant's canonical form with the shared issuer secret.
+function signGrantFor(request: ActionRequest, secret: string): SignedGrantEnvelope {
+  const grant: ApprovalGrant = {
+    grant_id: `grant-${request.subjectDigest.slice(0, 16)}`,
+    provider: request.provider,
+    account: request.account,
+    surface: request.surface,
+    action: request.action,
+    subject_digest: request.subjectDigest,
+    expires_at: '2099-01-01T00:00:00.000Z'
+  };
+  return {
+    grant,
+    signature: createHmac('sha256', secret).update(canonicalActionInput(grant), 'utf8').digest('hex')
+  };
 }
 
 async function expectCompletesWithin<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {

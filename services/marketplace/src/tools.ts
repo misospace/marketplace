@@ -18,6 +18,8 @@ import {
   threadsListOutputSchema,
   threadReadInputSchema,
   threadReadOutputSchema,
+  threadSendInputSchema,
+  sendOutputSchema,
   SCHEMA_VERSION,
   searchInputSchema,
   searchOutputSchema,
@@ -27,6 +29,8 @@ import {
   providerErrorSchema,
   runtimeFailureSchema,
   type RuntimeFailure,
+  type ThreadSendInput,
+  type ConversationThreadMessages,
   shoppingSearchInputSchema,
   shoppingFetchInputSchema,
   shoppingSearchOutputSchema,
@@ -86,6 +90,13 @@ const TOOLS = [
     inputSchema: threadReadInputSchema,
     outputSchema: threadReadOutputSchema,
     definition: { riskClass: 'read', scope: messengerScope }
+  },
+  {
+    name: 'messenger_send',
+    description: 'Send one approval-grant-bound message into a conversation thread. Requires a single-use signed approval grant; a timed-out send is reconciled by reading the thread for its idempotency token and is never resent.',
+    inputSchema: threadSendInputSchema,
+    outputSchema: sendOutputSchema,
+    definition: { riskClass: 'send', scope: messengerScope }
   }
 ] as const;
 
@@ -94,7 +105,6 @@ export const TOOL_DEFINITIONS: Readonly<Record<ToolName, ActionDefinition>> = Ob
 ) as Record<ToolName, ActionDefinition>;
 
 type ToolName = typeof TOOLS[number]['name'];
-const inputSchemas = Object.fromEntries(TOOLS.map(({ name, inputSchema }) => [name, inputSchema])) as unknown as Record<ToolName, z.ZodType>;
 
 export interface MarketplaceToolOptions {
   backendName?: string;
@@ -125,15 +135,19 @@ export function registerMarketplaceTools(
   logger: Pick<Console, 'error'> = console,
   options: MarketplaceToolOptions = {}
 ): void {
-  assertWritableToolsHaveAuthorizer(TOOLS, options.authorizer);
+  // messenger_send is only live where the conversation surface exists; elsewhere it is an
+  // unknown tool and a call fails InvalidParams like any unregistered tool.
+  const activeTools = options.conversations ? TOOLS : TOOLS.filter((tool) => tool.name !== 'messenger_send');
+  assertWritableToolsHaveAuthorizer(activeTools, options.authorizer);
 
   const backendName = options.backendName ?? backend.name;
   const backendTimeoutMs = options.backendTimeoutMs ?? 30_000;
   const shutdownSignal = options.shutdownSignal;
   const authorizer = options.authorizer ?? new DenyAllAuthorizer();
+  const inputSchemas = Object.fromEntries(activeTools.map(({ name, inputSchema }) => [name, inputSchema])) as unknown as Record<ToolName, z.ZodType>;
   server.registerCapabilities({ tools: {} });
   server.setRequestHandler(ListToolsRequestSchema, () => ({
-    tools: TOOLS.map(({ name, description, inputSchema, outputSchema }) => ({
+    tools: activeTools.map(({ name, description, inputSchema, outputSchema }) => ({
       name,
       description,
       inputSchema: toMcpObjectSchema(inputSchema, 'input', name),
@@ -179,12 +193,14 @@ export function registerMarketplaceTools(
           ? threadsListOutputSchema
           : name === 'messenger_thread_read'
             ? threadReadOutputSchema
-            : name === 'shopping_search'
-              ? shoppingSearchOutputSchema
-              : name === 'shopping_fetch'
-                ? shoppingFetchOutputSchema
-                : statusOutputSchema;
-    let validatedOutput: z.infer<typeof searchOutputSchema | typeof fetchOutputSchema | typeof statusOutputSchema | typeof threadsListOutputSchema | typeof threadReadOutputSchema | typeof shoppingSearchOutputSchema | typeof shoppingFetchOutputSchema>;
+            : name === 'messenger_send'
+              ? sendOutputSchema
+              : name === 'shopping_search'
+                ? shoppingSearchOutputSchema
+                : name === 'shopping_fetch'
+                  ? shoppingFetchOutputSchema
+                  : statusOutputSchema;
+    let validatedOutput: z.infer<typeof searchOutputSchema | typeof fetchOutputSchema | typeof statusOutputSchema | typeof threadsListOutputSchema | typeof threadReadOutputSchema | typeof sendOutputSchema | typeof shoppingSearchOutputSchema | typeof shoppingFetchOutputSchema>;
     if (!decision.ok) {
       // Refusals parse against the shared runtime failure schema so the uniform refusal shape
       // does not depend on each tool's success-oriented output schema.
@@ -232,6 +248,20 @@ export function registerMarketplaceTools(
           output = thread === null
             ? runtimeFailure('NOT_FOUND', 'No conversation thread matched the supplied identifier.')
             : { ok: true, backend: backendName, thread_id: thread.thread_id, messages: thread.messages };
+        } else if (name === 'messenger_send') {
+          const conversations = options.conversations;
+          if (!conversations) throw new ProviderError('UPSTREAM_ERROR', 'The messenger surface is not configured on this deployment.');
+          const sendInput = parsed.data as ThreadSendInput;
+          try {
+            await runBackendOperation((signal) => conversations.sendThread(sendInput, signal), backendTimeoutMs, extra.signal, shutdownSignal);
+            output = { ok: true, backend: backendName, thread_id: sendInput.thread_id, status: 'sent' };
+          } catch (error) {
+            if (!(error instanceof ProviderError && error.code === 'TIMEOUT')) throw error;
+            // A timed-out send has an unknown outcome and is reconciled, never resent; any
+            // retry is a new approval decision for the host (provider-action-boundaries).
+            const delivered = await reconcileSentThread(conversations, sendInput, backendTimeoutMs, extra.signal, shutdownSignal);
+            output = { ok: true, backend: backendName, thread_id: sendInput.thread_id, status: delivered ? 'sent' : 'unknown' };
+          }
         } else if (name === 'shopping_search') {
           const shopping = options.shopping;
           if (!shopping) throw new ProviderError('UPSTREAM_ERROR', 'The shopping surface is not configured on this deployment.');
@@ -319,6 +349,29 @@ function getProviderFailure(error: unknown): RuntimeFailure['error'] | undefined
   } catch {
     return undefined;
   }
+}
+
+async function reconcileSentThread(
+  conversations: ConversationBackend,
+  sendInput: ThreadSendInput,
+  timeoutMs: number,
+  requestSignal: AbortSignal,
+  shutdownSignal?: AbortSignal
+): Promise<boolean> {
+  let thread: ConversationThreadMessages | null;
+  try {
+    thread = await runBackendOperation(
+      (signal) => conversations.readThread({ thread_id: sendInput.thread_id }, signal),
+      timeoutMs,
+      requestSignal,
+      shutdownSignal
+    );
+  } catch (error) {
+    if (requestSignal.aborted || shutdownSignal?.aborted) throw error;
+    return false;
+  }
+  if (thread === null) return false;
+  return thread.messages.some(({ text }) => text.includes(sendInput.idempotency_token));
 }
 
 export async function runBackendOperation<T>(

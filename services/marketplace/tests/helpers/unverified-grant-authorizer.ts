@@ -10,9 +10,11 @@ import {
  * expiry, and single-use consumption — but it does NOT establish that anyone
  * actually approved the action: any well-formed grant with matching fields is
  * accepted on first use. It exists to exercise the verifier mechanics the
- * contract describes. Production authorization stays deny-all until #43 ships
- * a verifier that authenticates grant issuance (a trusted host-only channel or
- * issuer signature). Never wire this into a production service.
+ * contract describes. The production verifier that authenticates grant
+ * issuance is `HmacGrantAuthorizer` (#63), which verifies a shared-secret
+ * HMAC-SHA256 signature over the canonical grant form before any scope,
+ * expiry, or consumption check. This test double must still never be wired
+ * into a production service.
  */
 export class UnverifiedGrantAuthorizer implements ActionAuthorizer {
   private readonly consumedGrantIds = new Set<string>();
