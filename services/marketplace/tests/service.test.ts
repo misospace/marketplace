@@ -432,7 +432,7 @@ describe('fixture MCP service', () => {
       expect(service.messengerBrowser).toBeDefined();
       expect(service.messengerBrowser).not.toBe(service.browser);
       expect(service.messengerBrowser?.profileDir).toBe(join(profileRoot, 'messenger'));
-      expect(service.messengerProbe?.probeUrl).toBe('http://127.0.0.1:3210/messages/');
+      expect(service.messengerProbe?.probeUrl).toBe('http://127.0.0.1:3210/marketplace/inbox/');
       expect(service.browser.profileDir).not.toBe(service.messengerBrowser?.profileDir);
     } finally {
       await service.close();

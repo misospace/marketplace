@@ -300,10 +300,10 @@ describe.skipIf(!browserAvailable)('Facebook credential login', () => {
     });
 
     await expect(login.attempt(new AbortController().signal)).resolves.toEqual({ outcome: 'authenticated' });
-    // The approval lands on the authenticated home page; verification must navigate /messages/ and
-    // must not lean on Marketplace being reachable.
+    // The approval lands on the authenticated home page; verification must navigate /marketplace/inbox/
+    // and must not lean on the Marketplace listing surface being reachable.
     expect(server.requests).toContain('/');
-    expect(server.requests).toContain('/messages/');
+    expect(server.requests).toContain('/marketplace/inbox/');
     expect(server.requests).not.toContain('/marketplace/');
     expect(manager.getInfo().status).toBe('session_unknown');
   });

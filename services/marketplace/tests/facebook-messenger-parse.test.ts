@@ -63,6 +63,30 @@ describe('Messenger page interpretation', () => {
       .toMatchObject({ kind: 'error', code: 'UPSTREAM_ERROR', message: 'The Facebook Marketplace inbox page layout was not recognized.' });
   });
 
+  it('uses validated GraphQL ids before DOM anchors and fails closed on unusable recognized connections', () => {
+    const page = inbox({ threads: [{ threadId: 'dom-id', preview: 'DOM preview' }] });
+    expect(interpretMessengerInboxPage({
+      page, baseUrl: 'https://www.facebook.com', inboxPath: '/marketplace/inbox/', limit: 1,
+      graphql: { recognized: true, malformed: false, empty: false, threadIds: ['graphql-id'] }
+    })).toEqual({ kind: 'threads', threads: [{ thread_id: 'graphql-id' }] });
+    expect(interpretMessengerInboxPage({
+      page, baseUrl: 'https://www.facebook.com', inboxPath: '/marketplace/inbox/', limit: 1,
+      graphql: { recognized: true, malformed: true, empty: false, threadIds: [] }
+    })).toMatchObject({ kind: 'error', code: 'UPSTREAM_ERROR' });
+    expect(interpretMessengerInboxPage({
+      page: inbox(), baseUrl: 'https://www.facebook.com', inboxPath: '/marketplace/inbox/', limit: 1,
+      graphql: { recognized: true, malformed: false, empty: true, threadIds: [] }
+    })).toEqual({ kind: 'empty' });
+    expect(interpretMessengerInboxPage({
+      page: inbox(), baseUrl: 'https://www.facebook.com', inboxPath: '/marketplace/inbox/', limit: 1,
+      graphql: { recognized: true, malformed: false, empty: false, threadIds: [] }
+    })).toMatchObject({ kind: 'error', code: 'UPSTREAM_ERROR' });
+    expect(interpretMessengerInboxPage({
+      page, baseUrl: 'https://www.facebook.com', inboxPath: '/marketplace/inbox/', limit: 1,
+      graphql: { recognized: false, malformed: false, empty: false, threadIds: [] }
+    })).toEqual({ kind: 'threads', threads: [{ thread_id: 'dom-id', preview: 'DOM preview' }] });
+  });
+
   it('classifies thread rows only on an authenticated main page and fails closed for zero rows', () => {
     expect(classifyMessengerThreadPage(thread({ messages: [{ sender: 'you', text: 'Hello' }] }))).toBe('messages');
     expect(classifyMessengerThreadPage(thread())).toBe('unknown');
