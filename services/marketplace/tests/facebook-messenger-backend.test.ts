@@ -403,7 +403,7 @@ describe('Facebook Messenger backend send submit-triggered metadata', () => {
     const error = (await backend.sendThread(sendInput(), new AbortController().signal).catch((e) => e)) as ProviderError;
     expect(error).toBeInstanceOf(ProviderError);
     expect(error.code).toBe('TIMEOUT');
-    expect(error.message).toBe('The Facebook Messenger thread page did not load in time.');
+    expect(error.message).toBe('The Messenger send did not complete in time.');
     expect(error.metadata.submit_triggered).toBe(true);
   });
 

@@ -275,7 +275,13 @@ export class FacebookMessengerBackend implements ConversationBackend {
       if (signal.aborted) throw signal.reason ?? error;
       const submitMetadata = submitTriggered ? { submit_triggered: true } : undefined;
       if (error instanceof errors.TimeoutError) {
-        throw new MarketplaceProviderError('TIMEOUT', 'The Facebook Messenger thread page did not load in time.', submitMetadata);
+        // A timeout after the Enter press means the send itself did not complete, not that the
+        // page failed to load.
+        throw new MarketplaceProviderError(
+          'TIMEOUT',
+          submitTriggered ? 'The Messenger send did not complete in time.' : 'The Facebook Messenger thread page did not load in time.',
+          submitMetadata
+        );
       }
       if (error instanceof MarketplaceProviderError) {
         throw submitTriggered

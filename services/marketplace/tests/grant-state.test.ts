@@ -1,5 +1,5 @@
 import { createHmac } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -106,6 +106,27 @@ describe('FileGrantConsumptionStore', () => {
     expect(existsSync(join(dir, 'grant-still-valid'))).toBe(true);
   });
 
+  it('prunes expired numeric markers but keeps empty and non-numeric (corrupt) markers', () => {
+    const dir = freshDir();
+    const nowMs = 100_000;
+    const store = new FileGrantConsumptionStore({ dir, now: () => new Date(nowMs) });
+    // One expired numeric marker plus a far-future marker that must survive.
+    expect(store.claim('grant-expired', 10_000)).toBe(true);
+    expect(store.claim('grant-future', 999_999_999)).toBe(true);
+    // Simulate a concurrent replica's in-flight claim: an empty file (the write not yet
+    // flushed) and a crash-truncated / corrupt non-numeric marker.
+    writeFileSync(join(dir, 'grant-empty'), '');
+    writeFileSync(join(dir, 'grant-corrupt'), 'not-a-number');
+    // A fresh instance has a fresh throttle budget, so its first claim runs a prune.
+    const pruner = new FileGrantConsumptionStore({ dir, now: () => new Date(nowMs) });
+    expect(pruner.claim('grant-new', 999_999_999)).toBe(true);
+
+    expect(existsSync(join(dir, 'grant-expired'))).toBe(false);
+    expect(existsSync(join(dir, 'grant-empty'))).toBe(true);
+    expect(existsSync(join(dir, 'grant-corrupt'))).toBe(true);
+    expect(existsSync(join(dir, 'grant-future'))).toBe(true);
+  });
+
   it('never lets a prune failure break a claim', () => {
     const dir = freshDir();
     let nowMs = 1_000;
@@ -126,6 +147,8 @@ describe('FileGrantConsumptionStore', () => {
     expect(() => store.claim('a/b', 10_000)).toThrow(TypeError);
     expect(() => store.claim('bad\nid', 10_000)).toThrow(TypeError);
     expect(() => store.claim('', 10_000)).toThrow(TypeError);
+    expect(() => store.claim('.', 10_000)).toThrow(TypeError);
+    expect(() => store.claim('..', 10_000)).toThrow(TypeError);
     expect(readdirSync(dir)).toEqual([]);
   });
 });

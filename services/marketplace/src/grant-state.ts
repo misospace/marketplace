@@ -1,4 +1,4 @@
-import { closeSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync, writeSync } from 'node:fs';
+import { closeSync, fsyncSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
 
 /**
@@ -26,8 +26,8 @@ export class InMemoryGrantConsumptionStore implements GrantConsumptionStore {
 
   claim(grantId: string, expiresAtMs: number): boolean {
     const nowMs = this.now().getTime();
-    for (const [id, expiresAtMs] of this.consumed) {
-      if (expiresAtMs <= nowMs) this.consumed.delete(id);
+    for (const [id, expiryMs] of this.consumed) {
+      if (expiryMs <= nowMs) this.consumed.delete(id);
     }
     if (this.consumed.has(grantId)) return false;
     this.consumed.set(grantId, expiresAtMs);
@@ -57,7 +57,9 @@ export class FileGrantConsumptionStore implements GrantConsumptionStore {
   claim(grantId: string, expiresAtMs: number): boolean {
     // Grant ids are validated upstream by approvalGrantSchema; re-check here
     // because the id is spliced into a file path.
-    if (!GRANT_ID_PATTERN.test(grantId)) {
+    // '.' and '..' also match the character class, so reject them explicitly: they are path
+    // references that would let a grant id escape the state directory.
+    if (grantId === '.' || grantId === '..' || !GRANT_ID_PATTERN.test(grantId)) {
       throw new TypeError('grantId must match /^[A-Za-z0-9._:-]+$/');
     }
     const nowMs = this.now().getTime();
@@ -73,6 +75,9 @@ export class FileGrantConsumptionStore implements GrantConsumptionStore {
       const handle = openSync(join(this.dir, grantId), 'wx');
       try {
         writeSync(handle, String(expiresAtMs));
+        // Flush the expiry to stable storage before closing, so a crash cannot leave a
+        // zero-length marker that a later prune would (correctly) treat as an in-flight claim.
+        fsyncSync(handle);
       } finally {
         closeSync(handle);
       }
@@ -88,8 +93,12 @@ export class FileGrantConsumptionStore implements GrantConsumptionStore {
   private pruneExpired(nowMs: number): void {
     for (const name of readdirSync(this.dir)) {
       try {
-        const stored = Number(readFileSync(join(this.dir, name), 'utf8').trim());
-        if (Number.isFinite(stored) && stored <= nowMs) {
+        const raw = readFileSync(join(this.dir, name), 'utf8');
+        // Delete only a well-formed numeric expiry that has already passed. An empty or
+        // non-numeric marker is kept, not deleted: it can be a concurrent replica's
+        // just-created (not-yet-written or crash-truncated) claim, and unlinking it would
+        // resurrect a consumed grant.
+        if (/^[0-9]+$/.test(raw) && Number(raw) <= nowMs) {
           rmSync(join(this.dir, name));
         }
       } catch {

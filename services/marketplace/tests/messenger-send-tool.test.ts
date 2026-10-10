@@ -88,7 +88,7 @@ function buildGrant(input: ThreadSendInput, overrides: Partial<GrantFields> = {}
 }
 
 type SendBehavior = 'ok' | 'timeout' | 'submit-upstream' | 'upstream' | 'session-invalid';
-type ReadBehavior = 'confirmed' | 'unconfirmed' | 'null' | 'throws';
+type ReadBehavior = 'confirmed' | 'bare-token' | 'unconfirmed' | 'null' | 'throws';
 
 function fakeConversations(send: SendBehavior, read: ReadBehavior, input: ThreadSendInput) {
   const calls = { sendThread: 0, readThread: 0 };
@@ -100,6 +100,11 @@ function fakeConversations(send: SendBehavior, read: ReadBehavior, input: Thread
       if (read === 'throws') throw new ProviderError('TIMEOUT', 'The backend operation exceeded its deadline.');
       if (read === 'confirmed') {
         return { thread_id: input.thread_id, messages: [{ sender: 'you', text: renderDeliveredMessage(input) }] as ConversationMessage[] };
+      }
+      if (read === 'bare-token') {
+        // The bare token, without the brackets of the delivered form, is a different text and
+        // must not count as delivery confirmation.
+        return { thread_id: input.thread_id, messages: [{ sender: 'you', text: `A reply that mentions ${input.idempotency_token} in plain text.` }] as ConversationMessage[] };
       }
       if (read === 'unconfirmed') {
         return { thread_id: input.thread_id, messages: [{ sender: 'you', text: 'A reply that carries no idempotency marker.' }] as ConversationMessage[] };
@@ -276,6 +281,21 @@ describe('messenger_send post-success delivery observation', () => {
   it('reports a resolved send as unknown when the observation read returns no thread', async () => {
     const input = sendInput();
     const { conversations, calls } = fakeConversations('ok', 'null', input);
+    const approvalGrant = vi.fn(() => buildGrant(input));
+    const authorizer = new HmacGrantAuthorizer({ secret: SECRET });
+    const handlers = register({ conversations, authorizer, approvalGrant });
+
+    const result = await invoke(handlers, 'messenger_send', { ...input });
+
+    expect(result.isError).toBe(false);
+    expect(result.structuredContent).toEqual({ ok: true, backend: 'fixture', thread_id: input.thread_id, status: 'unknown' });
+    expect(calls.sendThread).toBe(1);
+    expect(calls.readThread).toBe(1);
+  });
+
+  it('does not treat a bare (non-bracketed) token in a thread message as delivery confirmation', async () => {
+    const input = sendInput();
+    const { conversations, calls } = fakeConversations('ok', 'bare-token', input);
     const approvalGrant = vi.fn(() => buildGrant(input));
     const authorizer = new HmacGrantAuthorizer({ secret: SECRET });
     const handlers = register({ conversations, authorizer, approvalGrant });

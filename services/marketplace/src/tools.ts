@@ -376,7 +376,7 @@ async function reconcileSentThread(
     return false;
   }
   if (thread === null) return false;
-  return thread.messages.some(({ text }) => text.includes(sendInput.idempotency_token));
+  return thread.messages.some(({ text }) => text.includes(`[${sendInput.idempotency_token}]`));
 }
 
 export async function runBackendOperation<T>(
